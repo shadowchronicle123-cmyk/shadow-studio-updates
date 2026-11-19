@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 import re
 import requests
+import threading, time
 
 VOICES = [
     {'id':'en-US-AriaNeural','name':'Aria — conversational woman (US)','provider':'online'},
@@ -30,8 +31,21 @@ def available_voices():
     extra = configured_elevenlabs_voice()
     return ([extra] if extra else []) + VOICES
 
+_voices_lock=threading.Lock()
+_voice_cache={'at':0,'ids':set()}
 def valid_voice(voice):
-    return any(v['id'] == voice for v in available_voices())
+    if any(v['id']==voice for v in available_voices()):return True
+    if not voice.startswith('elevenlabs:'):return False
+    candidate=voice.split(':',1)[1]
+    if not re.fullmatch(r'[A-Za-z0-9]{12,64}',candidate) or not os.getenv('ELEVENLABS_API_KEY'):return False
+    with _voices_lock:
+        if time.monotonic()-_voice_cache['at']>300:
+            try:
+                from elevenlabs_connection import list_voices
+                _voice_cache['ids']={v['id'] for v in list_voices()}
+                _voice_cache['at']=time.monotonic()
+            except Exception:return False
+        return candidate in _voice_cache['ids']
 
 VOICE_IDS = {v['id'] for v in VOICES}
 
