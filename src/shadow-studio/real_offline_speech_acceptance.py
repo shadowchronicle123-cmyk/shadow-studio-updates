@@ -12,6 +12,7 @@ The regular CI intentionally uses fake ASR; this opt-in check tests real speech.
 """
 import os
 from array import array
+import math
 from sys import byteorder
 from pathlib import Path
 import shutil
@@ -46,9 +47,9 @@ def probe_audio(path):
     samples.frombytes(decoded)
     if byteorder != "little":
         samples.byteswap()
-    if len(samples) < 16000:
-        raise AssertionError("Audio is missing or shorter than one second")
-    return sum(sample * sample for sample in samples) / len(samples)
+    if not samples:
+        raise AssertionError("Decoded audio is empty")
+    return len(samples) / 16000, sum(sample * sample for sample in samples) / len(samples)
 
 
 def run():
@@ -81,9 +82,11 @@ def run():
                               model_factory=existing_model_factory)
         if not output.is_file() or output.stat().st_size == 0:
             raise AssertionError("Captioned MP4 not created")
-        before = probe_audio(speech_clip)
-        after = probe_audio(output)
-        if before <= 100 or not 0.5 < after / before < 1.5:
+        source_duration, before = probe_audio(speech_clip)
+        rendered_duration, after = probe_audio(output)
+        if abs(source_duration - rendered_duration) > 0.10:
+            raise AssertionError("Caption rendering truncated or extended audio")
+        if not math.isfinite(after) or before <= 100 or not 0.5 < after / before < 1.5:
             raise AssertionError("Caption rendering muted or significantly changed audio")
     print("PASS real local speech recognition, timed captions, MP4 and audible preserved audio")
 
