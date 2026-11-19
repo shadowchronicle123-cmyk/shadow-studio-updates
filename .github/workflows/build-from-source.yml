@@ -14,7 +14,8 @@ permissions:
 
 concurrency:
   group: shadow-studio-release
-  cancel-in-progress: false
+  # Ordinary pushes wait their turn. An explicitly marked recovery can replace a stalled run.
+  cancel-in-progress: ${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Retry stalled Shadow Studio release') }}
 
 jobs:
   windows-smoke:
@@ -60,12 +61,13 @@ jobs:
           cache: pip
           cache-dependency-path: src/shadow-studio/requirements.txt
       - name: Install export test dependencies
+        timeout-minutes: 4
         run: |
           if ! command -v ffmpeg || ! command -v ffprobe; then
-            sudo apt-get update
-            sudo apt-get install -y ffmpeg
+            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 update
+            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 install -y ffmpeg
           fi
-          python -m pip install packaging -r src/shadow-studio/requirements.txt
+          python -m pip install --disable-pip-version-check --timeout 20 --retries 2 packaging -r src/shadow-studio/requirements.txt
       - name: Run offline release tests
         working-directory: src/shadow-studio
         run: |
