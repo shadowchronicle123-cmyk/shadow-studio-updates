@@ -1,5 +1,6 @@
 """Validate private upload and duplicate guards with a fake YouTube transport."""
 import hashlib
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -7,6 +8,7 @@ from unittest.mock import Mock
 import requests
 
 import private_upload
+from authorize_youtube import write_config
 from production_worker import ledger, set_stop, status
 
 CHANNEL = 'UC' + 'X'*22
@@ -112,6 +114,23 @@ def main():
         with ledger(root) as db:
             assert all(not any(credential in str(tuple(row)) for credential in (token,'fake-client-secret','fake-refresh'))
                        for row in db.execute('SELECT * FROM private_uploads'))
+        credentials = SimpleNamespace(token=token,refresh_token='fake-refresh',
+                                      client_id='fake-client-id',client_secret='fake-client-secret')
+        config = root/'youtube.json'
+        verify = Mock()
+        write_config(config,credentials,CHANNEL,'not-made-for-kids',False,verify=verify)
+        verify.assert_called_once()
+        saved=private_upload.read_worker_settings(config)
+        assert saved=={**env,'SHADOW_YOUTUBE_PRIVATE_AUTOMATION':'0'}
+        if os.name=='posix':
+            assert config.stat().st_mode & 0o777 == 0o600
+        try:
+            write_config(config,credentials,CHANNEL,'not-made-for-kids',True,verify=verify)
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError('Expected existing credentials to be preserved')
+        assert saved==private_upload.read_worker_settings(config)
 
     print('PASS channel pinning, OAuth refresh, daily opt-in, exact checksum, pause and safe upload retries')
 

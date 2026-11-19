@@ -165,6 +165,16 @@ def upload_daily(root, day, env, http=requests):
                   confirmed=True,for_kids=audience=='made-for-kids',http=http)
 
 
+def read_worker_settings(path):
+    try:
+        settings = json.loads(path.read_text(encoding='utf-8'))
+        if isinstance(settings, dict) and all(isinstance(value,str) for value in settings.values()):
+            return settings
+    except (OSError, ValueError):
+        pass
+    raise ValueError('The YouTube worker credential file is missing or invalid')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--state',type=Path,required=True)
@@ -173,27 +183,24 @@ def main():
     parser.add_argument('--confirm-private',action='store_true')
     parser.add_argument('--audience',choices=('made-for-kids','not-made-for-kids'))
     parser.add_argument('--daily',action='store_true')
+    parser.add_argument('--credentials',type=Path)
     parser.add_argument('--timezone',default='UTC')
     args = parser.parse_args()
     try:
+        config = args.credentials
+        if config is None and (directory := os.getenv('CREDENTIALS_DIRECTORY')):
+            config = Path(directory)/'youtube.json'
+        env = os.environ if config is None else read_worker_settings(config)
         if args.daily:
             if args.day or args.sha256 or args.confirm_private or args.audience:
                 parser.error('--daily cannot be combined with single-video approval options')
             day = datetime.now(ZoneInfo(args.timezone)).date().isoformat()
-            env = os.environ
-            if directory := env.get('CREDENTIALS_DIRECTORY'):
-                try:
-                    env = json.loads((Path(directory)/'youtube.json').read_text(encoding='utf-8'))
-                    if not isinstance(env, dict) or not all(isinstance(value,str) for value in env.values()):
-                        raise ValueError()
-                except (OSError, ValueError):
-                    raise ValueError('The YouTube worker credential file is missing or invalid') from None
             result = upload_daily(args.state,day,env)
         else:
             if not (args.day and args.sha256 and args.confirm_private and args.audience):
                 parser.error('supply --day, --sha256, --confirm-private and --audience')
-            token = os.getenv('SHADOW_YOUTUBE_ACCESS_TOKEN') or refresh_access_token(os.environ)
-            result = upload(args.state,args.day,args.sha256,token,channel_id=os.getenv('SHADOW_YOUTUBE_CHANNEL_ID'),
+            token = env.get('SHADOW_YOUTUBE_ACCESS_TOKEN') or refresh_access_token(env)
+            result = upload(args.state,args.day,args.sha256,token,channel_id=env.get('SHADOW_YOUTUBE_CHANNEL_ID'),
                             confirmed=True,for_kids=args.audience=='made-for-kids')
     except RetryableUpload as exc:
         print('Private upload blocked:', exc)

@@ -5,11 +5,13 @@ import sys
 from pathlib import Path
 import subprocess
 import tempfile
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 import wave
 
 from fastapi.testclient import TestClient
 import app
+import private_upload
 import production_worker as worker
 from production_smoke_test import synthetic_voice
 
@@ -79,6 +81,23 @@ def main(real=False):
             assert db.execute('SELECT sha256 FROM verified_exports WHERE day=?', (record['day'],)).fetchone()[0] == (
                 hashlib.sha256((controls/record['artifact']).read_bytes()).hexdigest()
             )
+        channel = 'UC'+'X'*22
+        transport = Mock()
+        transport.post.side_effect = [
+            SimpleNamespace(status_code=200,json=lambda:{'token_type':'Bearer','access_token':'test-access'}),
+            SimpleNamespace(status_code=200,headers={
+                'Location':'https://www.googleapis.com/upload/youtube/v3/videos?upload_id=test'}),
+        ]
+        transport.get.return_value = SimpleNamespace(status_code=200,json=lambda:{'items':[{'id':channel}]})
+        transport.put.return_value = SimpleNamespace(status_code=201,json=lambda:{
+            'id':'example1234','snippet':{'channelId':channel},'status':{'privacyStatus':'private'}})
+        env = {'SHADOW_YOUTUBE_PRIVATE_AUTOMATION':'1','SHADOW_YOUTUBE_AUDIENCE':'not-made-for-kids',
+               'SHADOW_YOUTUBE_CHANNEL_ID':channel,'SHADOW_YOUTUBE_CLIENT_ID':'test-client-id',
+               'SHADOW_YOUTUBE_CLIENT_SECRET':'test-client-secret','SHADOW_YOUTUBE_REFRESH_TOKEN':'test-refresh'}
+        assert private_upload.upload_daily(controls,record['day'],env,transport)=='example1234'
+        assert transport.put.call_args.kwargs['data']==(controls/record['artifact']).read_bytes()
+        assert private_upload.upload_daily(controls,record['day'],env,transport)=='private'
+        assert transport.put.call_count==1
         with patch.dict('os.environ',{'SHADOW_PRODUCTION_STATE':str(controls)}):
             downloaded = TestClient(app.app).get('/api/production/render/2026-11-19')
             assert downloaded.status_code == 200 and downloaded.content == (controls/record['artifact']).read_bytes()
