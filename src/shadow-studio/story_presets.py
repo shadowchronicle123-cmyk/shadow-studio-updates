@@ -73,3 +73,49 @@ STORIES = {
         )),
     ),
 }
+
+MORE_STORIES = {
+    'drama': ('The second job application', (
+        ('Me', 'I found a rejection letter in my dad’s toolbox. It was for a job he told me I was crazy to want.', 'Dad laughed when I said I wanted to work at the radio station. Then I found his old application for the same job.'),
+        ('Dad', 'I was nineteen. The manager told me I sounded like I was reading the weather at a funeral.', 'They let me read one announcement on tape. It did not go well.'),
+        ('Me', 'You could have told me that instead of making me feel stupid for applying.', 'When you laughed, I figured you thought I was going to embarrass myself.'),
+        ('Dad', 'I still have the tape, if you want to hear what embarrassing actually sounds like.', 'I can show you why they turned me down. Check the bottom drawer.'),
+        ('Me', 'The tape started with a weather report and ended with him laughing because the microphone fell.', 'He read one line. Something hit the floor, and then he laughed so hard he had to stop.'),
+        ('Dad', 'I laughed at your application because you looked just like me in that studio. I should have explained.', 'I was proud you applied. I just heard my own voice in my head and laughed before I thought.'),
+        ('Me', 'I handed him my script and asked if he wanted to do the second voice.', 'I still had to record my audition. I pulled out a second chair.'),
+        ('Me', 'The station called on Friday. I got the job, and Dad still wants a copy of the best take.', 'I got the Saturday shift. Dad listens every week, even when all I do is read the weather.'),
+    )),
+    'revenge': ('The duplicate receipt', (
+        ('Me', 'My roommate charged me for fixing a broken sink, then sent the same receipt to our landlord.', 'My roommate asked me to pay half the plumbing bill. The landlord had already paid all of it.'),
+        ('Friend', 'Did you pay him yet? I want to hear how confident he was.', 'Do you have his message asking for the money?'),
+        ('Me', 'I had already sent it. He even offered me a discount for paying that night.', 'I paid him that night. He said the plumber needed the money by morning.'),
+        ('Friend', 'Ask him to go over the charges while the landlord is there.', 'Set up a call about the bill. Let him explain it out loud.'),
+        ('Me', 'I put both copies of the receipt on the kitchen table and asked which one was mine.', 'At the lease meeting, I asked him to walk us through the receipt.'),
+        ('Me', 'He said I had paid for a different repair. The landlord read him the matching invoice number.', 'He claimed it was a second visit. The landlord put her copy down, with the same invoice number.'),
+        ('Friend', 'I hope you made him explain his special discount too.', 'Please tell me you let him finish explaining the discount first.'),
+        ('Me', 'He paid me back before the meeting ended. I still sent him a receipt.', 'My phone buzzed with the refund while we were still at the table. I marked it paid in full.'),
+    )),
+    'mystery': ('The library return slot', (
+        ('Me', 'Nine years after my grandma died, someone returned her library book with a postcard addressed to me.', 'The library called about a book my grandma borrowed. There was a new postcard tucked inside it with my name on it.'),
+        ('Librarian', 'It came through our return slot at eleven last night. There was no stamp on the postcard.', 'The book came in after closing. Whoever wrote the card delivered it in person.'),
+        ('Me', 'The card told me to check the back of the library’s oldest photo.', 'It said, ask about the photo above the stairs. There was nothing else on it.'),
+        ('Librarian', 'That is the town orchestra. Your grandma is in the front row.', 'We have one picture above the stairs. It is from the year your grandma joined the orchestra.'),
+        ('Me', 'We took the frame down. There was another photo hidden behind the first.', 'Behind the orchestra picture was a photo of two women holding matching instruments.'),
+        ('Librarian', 'The woman beside her is your great aunt. She moved back last week. She is the one who brought the book.', 'That is your grandma and her sister. Her sister asked me yesterday if I knew how to reach you.'),
+        ('Me', 'I asked why she had never just called. She said she wanted me to see them together first.', 'When I finally met her, she said the photo was the only proof she had of the years they spent together.'),
+        ('Me', 'We met at the library the following Saturday. She brought my grandma’s violin.', 'Her sister had kept the book for years. At our first lunch, she offered to teach me the song they played in that photo.'),
+    )),
+    'comedy': ('The office thermostat trial', (
+        ('Me', 'I lied about the office thermostat having a password. Management asked me to reset it on a video call.', 'To stop people fighting over the thermostat, I told everyone it had a password. Now I am the office thermostat administrator.'),
+        ('Friend', 'What password did you tell them it had?', 'How long did you think nobody would ask you to unlock it?'),
+        ('Me', 'I said it changed every week. Then somebody added me to the building maintenance calendar.', 'I told them it rotated. The office manager put my name on the maintenance spreadsheet.'),
+        ('Friend', 'Tell them the password is on the back. See who volunteers to unscrew it.', 'Hold the camera really still so nobody sees how hard you are thinking.'),
+        ('Me', 'I pressed two buttons and stared at the screen like I was waiting for a security code.', 'On the call, I tapped the arrow twice and asked everybody to hold for verification.'),
+        ('Me', 'The screen said replace battery. I said the new password would take a minute to sync.', 'The display went dark in the middle of my explanation. I told them it was rebooting.'),
+        ('Friend', 'The next time it dies, you are getting promoted to electrician.', 'Whatever they offer you, ask for a raise and a pack of batteries.'),
+        ('Me', 'Maintenance put in new batteries. My boss thanked me for coordinating the migration.', 'I replaced the batteries and everyone clapped. Nobody has changed the temperature since.'),
+    )),
+}
+
+for genre, outline in MORE_STORIES.items():
+    STORIES[genre] += (outline,)
