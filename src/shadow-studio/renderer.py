@@ -1,5 +1,5 @@
 """Offline story-to-video engine. Requires installed FFmpeg; voice is local OS TTS."""
-import os, math, wave, shutil, subprocess, tempfile, textwrap, audioop
+import os, math, wave, shutil, subprocess, tempfile, textwrap
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 from voice_engine import create_voice
@@ -137,26 +137,40 @@ def png_frame(path,story,index,style):
     im.save(path)
 
 def gameplay_frame(path,story,index,style):
-    """Text panel positioned below unobscured top-of-screen gameplay."""
-    im=Image.new('RGB',(W,H),'#110b11');d=ImageDraw.Draw(im)
-    d.rectangle((0,385,W,H),fill='#160d16')
-    d.text((22,415),'SHADOWCHRONICLES  •  STORY',font=font(19,True),fill='#f5b6c4')
-    d.rounded_rectangle((18,466,W-18,H-112),radius=18,fill='#26121e',outline='#6a304b',width=2)
-    # Only show the most recent messages to keep dialogue in the lower half.
-    recent=story['lines'][max(0,index-2):index+1]
-    blocks,total=_visible_messages(d,recent,font(23),365,335,
-                                   row_height=32,header_height=44,gap=12,max_lines=6)
-    y=max(500,835-total)
-    for item,rows,height in blocks:
-        me=item['speaker'].lower() in ('me','narrator')
-        x=92 if me else 32; right=502 if me else 448
-        d.rounded_rectangle((x,y,right,y+height),radius=15,fill='#97223f' if me else '#34455e')
-        d.text((x+12,y+7),item['speaker'],font=font(16,True),fill='#ffe6ec')
-        for j,line in enumerate(rows):d.text((x+12,y+30+32*j),line,font=font(23),fill='white')
-        y+=height+12
-    d.rounded_rectangle((22,H-94,W-22,H-25),radius=12,fill='#711b39')
-    d.text((38,H-72),'WHAT WOULD YOU DO?  ↓',font=font(22,True),fill='white')
+    """Draw chronological dialogue in the upper 42% of the video."""
+    im = Image.new('RGB', (W, H), '#101421')
+    draw = ImageDraw.Draw(im)
+    draw.line((20, 58, W-20, 58), fill='#39425a', width=2)
+    draw.text((22, 22), 'SHADOWCHRONICLES', font=font(21, True), fill='#f4e8ff')
+    recent = story['lines'][max(0, index-3):index+1]
+    text_font = font(22)
+    blocks, total = _visible_messages(draw, recent, text_font, 366, 304,
+                                      row_height=29, header_height=44, gap=9, max_lines=8)
+    speakers = list(dict.fromkeys(str(line.get('speaker', 'Narrator')).strip().casefold() for line in story['lines']))
+    colors = ('#793553', '#2b456a', '#306052', '#68502d', '#553c76')
+    y = 380 - total
+    for item, rows, height in blocks:
+        speaker_index = speakers.index(str(item.get('speaker', 'Narrator')).strip().casefold())
+        x = 126 if speaker_index == 0 else 24
+        draw.rounded_rectangle((x, y, x+390, y+height), radius=17,
+                               fill=colors[speaker_index % len(colors)])
+        draw.text((x+12, y+8), str(item.get('speaker', 'Narrator')), font=font(16, True), fill='#f1dfee')
+        for j, line in enumerate(rows):
+            draw.text((x+12, y+32+29*j), line, font=text_font, fill='white')
+        y += height + 9
     im.save(path)
+
+
+def line_pause(line):
+    """Seconds of silence immediately before this line appears and is spoken."""
+    try:
+        pause = float(line.get('pause_before', 0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Line pauses must be between 0 and 10 seconds') from exc
+    if not 0 <= pause <= 10:
+        raise ValueError('Line pauses must be between 0 and 10 seconds')
+    return pause
+
 
 def _srt_time(seconds):
     milliseconds = max(0, round(seconds * 1000))
@@ -166,7 +180,7 @@ def _srt_time(seconds):
     return f'{hours:02}:{minutes:02}:{secs:02},{millis:03}'
 
 
-def save_scene_subtitles(story, durations, destination):
+def save_scene_subtitles(story, durations, destination, narration=None):
     """One timestamped cue per narrated scene, aligned to the generated audio timeline.
 
     This SRT is editable in conventional video editors; it isn't word-aligned.
@@ -178,9 +192,10 @@ def save_scene_subtitles(story, durations, destination):
         if not text:
             position += duration
             continue
-        end = position + duration
-        blocks.append(f'{i}\n{_srt_time(position)} --> {_srt_time(end)}\n{text}\n')
-        position = end
+        offset, spoken = narration[i-1] if narration is not None else (0, duration)
+        start = position + offset
+        blocks.append(f'{i}\n{_srt_time(start)} --> {_srt_time(start + spoken)}\n{text}\n')
+        position += duration
     Path(destination).write_text('\n'.join(blocks), encoding='utf-8')
 
 
@@ -190,6 +205,7 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
     for line in story['lines']:
         if not isinstance(line, dict) or not str(line.get('text','')).strip():
             raise ValueError('Each narration scene needs non-empty text')
+        line_pause(line)
     if resolution not in ('720p','1080p'):raise ValueError('Choose 720p or 1080p')
     out_width,out_height=(720,1280) if resolution=='720p' else (1080,1920)
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):raise RuntimeError('FFmpeg and ffprobe are required on PATH')
@@ -199,7 +215,7 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
         from voice_engine import valid_voice
         if not valid_voice(second_voice): raise ValueError('Second character voice is unavailable')
     with tempfile.TemporaryDirectory(prefix='shadow_') as temp:
-        tmp=Path(temp);concat=[]; wavs=[]; durations=[]
+        tmp=Path(temp);concat=[]; wavs=[]; durations=[]; narration=[]
         for i,line in enumerate(story['lines']):
             if progress:progress(10+int(i/max(len(story['lines']),1)*45),f'Creating scene {i+1}/{len(story["lines"])}')
             wav=tmp/f'voice_{i:03}.wav'
@@ -210,43 +226,61 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
             normalized=tmp/f'a_{i:03}.wav'
             run(['ffmpeg','-y','-loglevel','error','-i',wav,'-ar','16000','-ac','1','-c:a','pcm_s16le',normalized])
             validate_narration_audio(normalized)
-            duration=max(audio_duration(normalized)+0.5,2.25);durations.append(duration);wavs.append(normalized)
+            with wave.open(str(normalized), 'rb') as pcm:
+                spoken = pcm.getnframes() / pcm.getframerate()
+            offset = round(line_pause(line) * 30) / 30
+            hold = math.ceil(max(spoken + 0.5, 2.25) * 30) / 30
+            durations.append(offset + hold)
+            narration.append((offset, spoken))
+            wavs.append(normalized)
             img=tmp/f'scene_{i:03}.png'
             if background:gameplay_frame(img,story,i,style)
             else:png_frame(img,story,i,style)
-            concat.append((img,duration))
-        save_scene_subtitles(story, durations, output_dir/'captions.srt')
+            if offset:
+                previous = tmp / f'scene_{i-1:03}.png'
+                if i == 0:
+                    previous = tmp / 'opening.png'
+                    Image.new('RGB', (W, H), '#101421').save(previous)
+                concat.append((previous, offset))
+            concat.append((img, hold))
+        save_scene_subtitles(story, durations, output_dir/'captions.srt', narration)
         listfile=tmp/'scenes.txt'
-        def escaped(p):return str(p).replace("'", "'\\''")
+        def escaped(p):return p.as_posix().replace("'", "'\\''")
         lines=[]
-        for img,dur in concat:lines.extend(["file '"+escaped(img)+"'",f'duration {dur:.3f}'])
-        lines.append("file '"+escaped(concat[-1][0])+"'")
+        for img,dur in concat:lines.extend(["file '"+escaped(img)+"'","option framerate 30",f'duration {dur:.6f}'])
+        lines.extend(["file '"+escaped(concat[-1][0])+"'", "option framerate 30"])
         listfile.write_text('\n'.join(lines),encoding='utf-8')
         if progress:progress(65,'Rendering vertical video')
         visual=tmp/'visual.mp4'
         run(['ffmpeg','-y','-loglevel','error','-safe','0','-f','concat','-i',listfile,'-vf','fps=30,format=yuv420p','-c:v','libx264','-preset','ultrafast','-crf','24','-pix_fmt','yuv420p',visual])
-        # Audio each speech followed by exactly enough silence for that scene.
-        audio_list=tmp/'audio.txt'; paths=[]
-        for i,(wav,dur) in enumerate(zip(wavs,durations)):
-            segment=tmp/f'segment_{i:03}.wav'
-            run(['ffmpeg','-y','-loglevel','error','-i',wav,'-af',f'apad=whole_dur={dur:.3f}','-t',f'{dur:.3f}','-ar','16000','-ac','1',segment]); paths.append(segment)
-        audio_list.write_text('\n'.join("file '"+escaped(x)+"'" for x in paths),encoding='utf-8')
-        audio=tmp/'full.wav';run(['ffmpeg','-y','-loglevel','error','-safe','0','-f','concat','-i',audio_list,'-c','copy',audio])
+        audio = tmp / 'full.wav'
+        with wave.open(str(audio), 'wb') as track:
+            track.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+            elapsed = 0.0
+            samples_written = 0
+            for wav, duration, (offset, _) in zip(wavs, durations, narration):
+                start = round((elapsed + offset) * 16000)
+                track.writeframes(b'\0\0' * (start - samples_written))
+                with wave.open(str(wav), 'rb') as speech:
+                    track.writeframes(speech.readframes(speech.getnframes()))
+                    samples_written = start + speech.getnframes()
+                elapsed += duration
+                end = round(elapsed * 16000)
+                track.writeframes(b'\0\0' * (end - samples_written))
+                samples_written = end
         output=output_dir/'short.mp4'
         args=['ffmpeg','-y','-loglevel','error','-i',visual,'-i',audio]
         if background and Path(background).is_file():
-            # Background is owned/licensed by the user. Compose an inset gameplay strip
-            # while preserving text readability; scale inside filter_complex.
-            # Gameplay occupies the TOP 40%, story panel the BOTTOM 60%.
-            # The previous renderer put an opaque story layer over the gameplay.
-            top=int(out_height*0.4)
-            lower=out_height-top
-            filter_graph=(f'[2:v]scale={out_width}:{out_height}:force_original_aspect_ratio=increase,'
-                          f'crop={out_width}:{out_height},setsar=1[bg];'
-                          f'[0:v]scale={out_width}:{out_height}:flags=lanczos,'
-                          f'crop={out_width}:{lower}:0:{top},setsar=1[panel];'
-                          f'[bg][panel]overlay=0:{top}:shortest=1,format=yuv420p[v]')
-            args.extend(['-stream_loop','-1','-ss',str(max(0,gameplay_start)),'-i',str(background),'-filter_complex',filter_graph,'-map','[v]','-map','1:a'])
+            panel_height = round(out_height * 0.42 / 2) * 2
+            gameplay_height = out_height - panel_height
+            filter_graph = (
+                f'[2:v]scale={out_width}:{gameplay_height}:force_original_aspect_ratio=increase:force_divisible_by=2,'
+                f'crop={out_width}:{gameplay_height},setsar=1[gameplay];'
+                f'[0:v]scale={out_width}:{out_height}:flags=lanczos,'
+                f'crop={out_width}:{panel_height}:0:0,setsar=1[panel];'
+                '[panel][gameplay]vstack=shortest=1,format=yuv420p[v]'
+            )
+            args.extend(['-stream_loop','-1','-ss',str(max(0,gameplay_start)),'-i',str(background),'-filter_complex_threads','1','-filter_complex',filter_graph,'-map','[v]','-map','1:a'])
         else:
             args.extend(['-map','0:v','-map','1:a','-vf',f'scale={out_width}:{out_height}:flags=lanczos,setsar=1'])
         args+=['-r','30','-c:v','libx264','-preset','veryfast','-crf','25','-pix_fmt','yuv420p','-c:a','aac','-b:a','96k','-t',f'{sum(durations):.3f}','-movflags','+faststart',output]

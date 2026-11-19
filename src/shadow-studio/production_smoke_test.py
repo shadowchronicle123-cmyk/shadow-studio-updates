@@ -29,7 +29,7 @@ def synthetic_voice(text, path, voice, rate):
 
 
 def main():
-    print('Shadow Studio v0.25 — offline export smoke test')
+    print('Shadow Studio — offline export smoke test')
     assert shutil.which('ffmpeg'), 'FFmpeg not installed or missing from PATH'
     assert shutil.which('ffprobe'), 'FFprobe not installed or missing from PATH'
     original_voice = renderer.create_voice
@@ -39,7 +39,7 @@ def main():
             destination = Path(workspace) / 'export'
             story = {'title':'Shadow Studio test', 'lines':[
                 {'speaker':'Me','text':'This is an offline export test.'},
-                {'speaker':'Friend','text':'The captions and audio must match the scene length.'},
+                {'speaker':'Friend','text':'The captions and audio must match the scene length.', 'pause_before': 1.5},
             ]}
             video = renderer.generate(story, destination, style='messages', resolution='720p')
             report = analyze(video['path'])
@@ -49,6 +49,8 @@ def main():
             captions = (destination / 'captions.srt').read_text(encoding='utf-8')
             assert '-->' in captions and story['lines'][0]['text'] in captions
             assert story['lines'][1]['text'] in captions
+            assert '00:00:03,767 --> 00:00:05,492' in captions, captions
+            assert '00:00:00,000 --> 00:00:01,225' in captions, captions
             assert report['audio_present'] and report['max_volume_db'] is not None
             print('PASS real vertical 720 x 1280 30 FPS MP4 export')
             print('PASS generated non-silent audio verified by FFprobe')
@@ -73,14 +75,21 @@ def main():
             from subprocess import run
             background = Path(workspace) / 'synthetic-background.mp4'
             run(['ffmpeg','-y','-loglevel','error','-f','lavfi','-i',
-                 'testsrc2=size=360x640:rate=30','-t','1','-c:v','libx264',
+                 'color=c=lime:size=640x360:rate=24','-t','1','-c:v','libx264',
                  '-preset','ultrafast',str(background)], check=True)
             gameplay = renderer.generate(story, Path(workspace) / 'gameplay',
                                          style='messages', background=background,
                                          resolution='720p')
             gameplay_report=analyze(gameplay['path'])
             assert gameplay_report['passed'] and gameplay_report['audio_present']
-            print('PASS gameplay-overlay MP4 with audio')
+            from subprocess import check_output
+            from PIL import Image
+            frame = check_output(['ffmpeg', '-loglevel', 'error', '-i', gameplay['path'],
+                                  '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-threads', '1', '-'])
+            image = Image.frombytes('RGB', (720, 1280), frame)
+            assert image.getpixel((10, 530))[1] < 80
+            assert image.getpixel((10, 545))[1] > 200
+            print('PASS landscape gameplay fills lower 58% beneath dialogue')
             print('QUALITY: '+json.dumps({k:report[k] for k in ['passed','width','height','fps','audio_present','duration_seconds','max_volume_db']}))
     finally:
         renderer.create_voice = original_voice

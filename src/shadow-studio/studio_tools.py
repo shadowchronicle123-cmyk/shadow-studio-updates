@@ -1,6 +1,7 @@
 """Local project, metadata, and clipping helpers for Shadow Studio."""
 import json, re, subprocess, uuid
 from pathlib import Path
+from renderer import line_pause
 
 BASE=Path(__file__).resolve().parent
 PROJECTS=BASE/'projects'; PROJECTS.mkdir(exist_ok=True)
@@ -17,7 +18,7 @@ def save_project(data):
         s=str(l.get('speaker','Narrator')).strip()[:24]
         t=str(l.get('text','')).strip()[:240]
         if not t:raise ValueError('Empty line')
-        cleaned.append({'speaker':s or 'Narrator','text':t})
+        cleaned.append({'speaker':s or 'Narrator','text':t,'pause_before':line_pause(l)})
     id=uuid.uuid4().hex[:12]
     payload={'id':id,'title':title,'lines':cleaned,'style':data.get('style','messages'),'voice':data.get('voice','en-US-AriaNeural'),'voice_rate':int(data.get('voice_rate',0)),'resolution':data.get('resolution','720p')}
     (PROJECTS/f'{id}.json').write_text(json.dumps(payload,ensure_ascii=False,indent=2),encoding='utf-8')
