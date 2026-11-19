@@ -62,7 +62,8 @@ jobs:
             'cloud_handoff_test.py',
             'update_manager_test.py',
             'migration_acceptance_test.py',
-            'windows_voice_test.py'
+            'windows_voice_test.py',
+            'streamer_preview_test.py'
           )
           foreach ($test in $tests) {
             Write-Host "Running $test"
@@ -116,6 +117,7 @@ jobs:
           python cloud_handoff_test.py
           python update_manager_test.py
           python migration_acceptance_test.py
+          python streamer_preview_test.py
 
   candidate:
     needs: [windows-qa, linux-qa]

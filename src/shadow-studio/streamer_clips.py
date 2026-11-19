@@ -5,7 +5,10 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+from contextlib import closing
+import tempfile
 from urllib.parse import urlsplit
+
 
 ALLOWED = {".mp4", ".mov", ".mkv", ".webm"}
 MAX_BYTES = 2 * 1024**3
@@ -35,10 +38,8 @@ def validate(item, media_root):
     for field in ("creator", "permission_reference"):
         if not isinstance(item[field], str) or len(item[field].strip()) < 3:
             raise ValueError("Invalid creator or permission evidence")
-    digest = hashlib.sha256()
     with candidate.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
+        digest = hashlib.file_digest(stream, "sha256")
     return {"creator": item["creator"].strip(), "source_url": item["source_url"],
             "permission_reference": item["permission_reference"], "license_scope": item["license_scope"],
             "file": str(candidate), "start_seconds": start, "end_seconds": end,
@@ -47,11 +48,16 @@ def validate(item, media_root):
 
 def queue(manifest, media_root, database):
     data = json.loads(Path(manifest).read_text(encoding="utf-8"))
+    return queue_items(data, media_root, database)
+
+
+def queue_items(data, media_root, database):
     if not isinstance(data, list):
         raise ValueError("Manifest must contain a list of clips")
     validated = [validate(item, media_root) for item in data]
     db_path = Path(database)
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    ids = []
     with closing(sqlite3.connect(db_path)) as db, db:
         db.execute("""CREATE TABLE IF NOT EXISTS clips (
             id INTEGER PRIMARY KEY, creator TEXT NOT NULL, source_url TEXT NOT NULL,
@@ -68,7 +74,59 @@ def queue(manifest, media_root, database):
                 "INSERT OR IGNORE INTO clips (" + ",".join(columns) + ") VALUES (" +
                 ",".join("?" for _ in columns) + ")", values)
             added += cursor.rowcount
-    return {"submitted": len(validated), "queued": added, "state": "review_required", "uploads": 0}
+            match = db.execute("""SELECT id,sha256 FROM clips
+                WHERE (source_url=? OR sha256=?) AND start_seconds=? AND end_seconds=? ORDER BY id LIMIT 1""",
+                (item['source_url'],item['sha256'],item['start_seconds'],item['end_seconds'])).fetchone()
+            if match[1] != item["sha256"]:
+                raise ValueError("This source and time range already has a different approved file in the rights ledger")
+            ids.append(match[0])
+    return {"submitted": len(validated), "queued": added, "ids": ids, "state": "review_required", "uploads": 0}
+
+
+def make_preview(database, clip_id, output_dir, anchor="center"):
+    from advanced_tools import media_duration
+    from quality_check import analyze
+    from studio_tools import clip_media
+
+    if anchor not in ("left", "center", "right"):
+        raise ValueError("Choose left, center or right framing")
+    with closing(sqlite3.connect(database)) as db:
+        db.row_factory = sqlite3.Row
+        clip = db.execute("SELECT * FROM clips WHERE id=?", (clip_id,)).fetchone()
+    if clip is None:
+        raise ValueError("Clip record was not found")
+    if clip["license_scope"] not in ("edit-and-repost", "commercial-edit-and-repost"):
+        raise ValueError("Preview requires permission to edit and repost the source")
+    source = Path(clip["file"])
+    with tempfile.TemporaryDirectory(prefix="streamer-preview-") as temp_dir:
+        scratch = Path(temp_dir)
+        snapshot = scratch / ("source" + source.suffix)
+        digest = hashlib.sha256()
+        size = 0
+        with source.open("rb") as stream, snapshot.open("wb") as out:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                size += len(block)
+                if size > MAX_BYTES:
+                    raise ValueError("Source file exceeds the approved size limit")
+                digest.update(block)
+                out.write(block)
+        if digest.hexdigest() != clip["sha256"]:
+            raise ValueError("Source file changed after rights intake")
+        span = clip["end_seconds"] - clip["start_seconds"]
+        if not 3 <= span <= 60 or clip["end_seconds"] > media_duration(snapshot) + .05:
+            raise ValueError("Choose a 3–60-second range within the source video")
+        # Stage the final file on the destination filesystem for atomic placement.
+        with tempfile.TemporaryDirectory(prefix="checked-clip-", dir=output_dir) as stage:
+            rendered = clip_media(snapshot, clip["start_seconds"], clip["end_seconds"],
+                                  output_dir=Path(stage), width=1080, height=1920,
+                                  horizontal_anchor=anchor, normalize=True)
+            report = analyze(rendered)
+            if (not report['passed'] or (report['width'],report['height']) != (1080,1920)
+                or abs(report['duration_seconds'] - span) > .2 or abs(report['fps'] - 30) > .1):
+                raise ValueError("The preview failed audio, video or timing checks")
+            destination = Path(output_dir) / rendered.name
+            rendered.replace(destination)
+    return destination
 
 
 def main():

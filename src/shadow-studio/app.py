@@ -19,6 +19,7 @@ from audio_mix import line_sound
 from captions import read_captions, as_webvtt
 from voice_engine import VOICES, available_voices, valid_voice, create_voice
 from studio_tools import save_project, list_projects, get_project, clip_media, CLIPS
+from streamer_clips import make_preview as render_streamer_preview, queue_items as queue_streamer_clips
 from gameplay_library import GameplayLibrary, gameplay_duration, gameplay_window
 from split_screen import split_screen
 from video_ranking import rank_videos
@@ -1015,6 +1016,36 @@ def download_clip(clipid:str):
     return FileResponse(f,media_type='video/mp4',filename='shadow_clip_'+clipid+'.mp4')
 
 
+class StreamerPreviewRequest(BaseModel):
+    background_name: str
+    creator: str = Field(min_length=3, max_length=100)
+    source_url: str = Field(min_length=12, max_length=2048)
+    permission_reference: str = Field(min_length=3, max_length=500)
+    license_scope: Literal['edit-and-repost', 'commercial-edit-and-repost']
+    start_seconds: float = Field(ge=0, le=36000)
+    end_seconds: float = Field(gt=0, le=36000)
+    anchor: Literal['left', 'center', 'right'] = 'center'
+
+
+@app.post('/api/streamer-clips/preview')
+def streamer_preview(req: StreamerPreviewRequest):
+    source = owned_source(req.background_name)
+    if not 3 <= req.end_seconds - req.start_seconds <= 60:
+        raise HTTPException(422, 'Choose a preview duration of 3–60 seconds')
+    database = ROOT/'projects'/'streamer-clips.sqlite3'
+    item = req.model_dump(exclude={'background_name', 'anchor'})
+    item['file'] = source.name
+    try:
+        queued = queue_streamer_clips([item], UPLOADS, database)
+        record = queued['ids'][0]
+        rendered = render_streamer_preview(database, record, CLIPS, req.anchor)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        raise HTTPException(422, 'Unable to render the source. Check FFmpeg and the uploaded video.') from exc
+    return {'clip_id': record, 'video_url': '/api/clip/' + rendered.stem, 'state': 'review_required'}
+
+
 # Split Screen: private, local, owner-uploaded footage only. Does not publish.
 class SplitRequest(BaseModel):
     top_name: str
@@ -1302,13 +1333,66 @@ HTML=r'''<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="
 <label for="rankSeconds">Seconds per ranked clip</label><select id="rankSeconds"><option value="3">3 seconds</option><option value="4" selected>4 seconds</option><option value="6">6 seconds</option><option value="8">8 seconds</option></select>
 <div class="row"><button id="rankButton" onclick="makeRanking()">Create ranked Short</button></div><p class="muted" id="rankStatus">Waiting for clips.</p>
 <div id="rankResult" hidden><video id="rankPlayer" controls playsinline preload="metadata"></video><div class="row"><a id="rankDownload" class="button" download>Download ranking MP4</a></div></div>
-</section><section class="panel" id="automation-panel" data-view-panel="automation" style="max-width:1100px;margin:0 auto 30px"><h2>5. Automation & Media Tools</h2><p class="muted">Queue up to eight Shorts with the production settings from Create. Finished videos go to Review Library.</p><label for="batchCount">Number of random stories</label><input type="number" id="batchCount" value="3" min="1" max="8"><button id="randomBatchBtn" onclick="startRandomBatch()" type="button">Queue random stories</button><label>Batch story ideas — one idea per line</label><textarea id="batchIdeas" placeholder="My friend found a secret note...&#10;The wedding invitation had the wrong name..." rows="4"></textarea><div class="help"><strong>Tonight’s quick production: three complete original stories</strong><p class="muted">Use three complete starter scripts with your current voices, gameplay, captions, pacing and music.</p><button id="readyBatchBtn" onclick="startReadyBatch()">▶ Render all 3 ready stories</button></div><div class="row"><button onclick="startBatch()" id="batchBtn">Generate batch</button><button class="subtle" onclick="refreshJobs()">Refresh jobs</button></div><div id="batchStatus" class="muted"></div><div id="jobList"></div><hr style="border:0;border-top:1px solid #303b50;margin:26px 0"><h2 id="clipper-panel">6. Basic video clipper</h2><p class="muted">Trim a video you own or have permission to use. This is a manual clipper, not AI highlight detection.</p><label>Source video</label><input type="file" id="clipFile" accept="video/*"><label for="clipUrl">Or public YouTube / Twitch URL</label><input type="url" id="clipUrl" placeholder="https://clips.twitch.tv/..."><label class="muted"><input type="checkbox" id="clipRights" style="width:auto"> I have the right to use this footage</label><div class="row"><div><label>Start second</label><input type="number" id="clipStart" min="0" step="0.1" value="0"></div><div><label>End second</label><input type="number" id="clipEnd" min="0.1" step="0.1" value="30"></div></div><div class="row"><button onclick="createClip()" id="clipBtn">Make vertical clip</button></div><div id="clipStatus" class="muted"></div><div id="clipLink"></div><div class="help muted">Nothing is uploaded to YouTube automatically. Videos need your approval and a connected publishing integration.</div></section><section class="panel assist-panel" data-view-panel="assistant" id="assistant-panel" style="max-width:1100px;margin:0 auto 30px"><span class="eyebrow">OWNER APPROVAL</span><h2>ChatGPT + YouTube handoff</h2><p class="muted">Start with an approved video from Review Library. Download the publishing kit and upload in YouTube Studio, or use a connected tool that can prepare a draft. Confirm visibility and publish in that service.</p><label for="assistTitle">Video title</label><input id="assistTitle" placeholder="Choose a finished video from Library, or enter a title"><label for="assistDesc">Description</label><textarea id="assistDesc" placeholder="Paste or edit the video description"></textarea><label for="assistNotes">What should ChatGPT help with?</label><select id="assistNotes"><option value="Review this video and improve its title, description, and hook">Review and optimize</option><option value="Prepare a YouTube Shorts publishing draft for ShadowChronicles and show it to me for approval">Prepare publishing draft</option><option value="Suggest improvements to the next three episodes">Plan follow-up stories</option></select><div class="row"><a class="button" href="https://studio.youtube.com/" target="_blank" rel="noopener noreferrer">Open YouTube Studio</a><button onclick="copyAssistantRequest()">Copy request for ChatGPT</button><button class="subtle" onclick="switchView('library')">Choose video from Library</button></div><div class="help muted" id="assistStatus">To send a completed MP4 to ChatGPT, attach the downloaded file in your chat after copying the request. A separate read-only private MCP connector is included in v0.20. It must be configured and connected from ChatGPT on web; it does not send messages into this conversation automatically.</div><div class="help"><strong>Download and upload workflow</strong><p>Open a completed video in Library, run its quality check, and mark it approved. Download the publishing kit for the MP4, captions when available, and the title and description. Use YouTube Studio or a connected uploader.</p><p class="muted">Optional private link handoff: configure S3-compatible storage in .env, then approve a video and click Generate private video link. Or enable auto-upload on approval. No tokens are included in any exported package.</p></div><h3 style="margin-top:26px">Bring a ChatGPT story into Shadow Studio</h3><p class="muted">Ask ChatGPT to write a story as JSON using this format: <code>{"title":"...","lines":[{"speaker":"Me","text":"..."}]}</code>. Paste its response here, then import the editable dialogue into Create.</p><textarea id="assistantImport" placeholder='{"title":"My shocking story","lines":[{"speaker":"Me","text":"You won’t believe this..."}]}'></textarea><div class="row"><button class="subtle" onclick="importAssistantStory()">Import story JSON</button></div><h3 style="margin-top:26px">Publishing draft queue</h3><p class="muted">Select a finished video in Library, approve it after the quality check, then return here to stage its title and description. Nothing will upload to YouTube.</p><label for="draftVideoId">Approved video ID</label><input id="draftVideoId" placeholder="Choose a video in Library first" readonly><label for="draftPrivacy">Desired YouTube visibility</label><select id="draftPrivacy"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public — still a draft only</option></select><div class="row"><button onclick="stagePublishingDraft()">Save publishing draft</button><button class="subtle" onclick="refreshPublishingDrafts()">Refresh drafts</button></div><div class="help" id="draftFeedback">Drafts are stored locally; no platform account is connected.</div><div id="draftQueue" class="muted"></div><h3 style="margin-top:26px">Publishing safety</h3><p class="muted">Draft → Review → Explicit approval → Publish using your connected YouTube/vidIQ service. No auto-publication or stored YouTube credentials in this release.</p></section><script>
+</section><section class="panel" id="automation-panel" data-view-panel="automation" style="max-width:1100px;margin:0 auto 30px"><h2>5. Automation & Media Tools</h2><p class="muted">Queue up to eight Shorts with the production settings from Create. Finished videos go to Review Library.</p><label for="batchCount">Number of random stories</label><input type="number" id="batchCount" value="3" min="1" max="8"><button id="randomBatchBtn" onclick="startRandomBatch()" type="button">Queue random stories</button><label>Batch story ideas — one idea per line</label><textarea id="batchIdeas" placeholder="My friend found a secret note...&#10;The wedding invitation had the wrong name..." rows="4"></textarea><div class="help"><strong>Tonight’s quick production: three complete original stories</strong><p class="muted">Use three complete starter scripts with your current voices, gameplay, captions, pacing and music.</p><button id="readyBatchBtn" onclick="startReadyBatch()">▶ Render all 3 ready stories</button></div><div class="row"><button onclick="startBatch()" id="batchBtn">Generate batch</button><button class="subtle" onclick="refreshJobs()">Refresh jobs</button></div><div id="batchStatus" class="muted"></div><div id="jobList"></div><hr style="border:0;border-top:1px solid #303b50;margin:26px 0"><h2 id="clipper-panel">6. Basic video clipper</h2><p class="muted">Trim a video you own or have permission to use. This is a manual clipper, not AI highlight detection.</p><label>Source video</label><input type="file" id="clipFile" accept="video/*"><label for="clipUrl">Or public YouTube / Twitch URL</label><input type="url" id="clipUrl" placeholder="https://clips.twitch.tv/..."><label class="muted"><input type="checkbox" id="clipRights" style="width:auto"> I have the right to use this footage</label><div class="row"><div><label>Start second</label><input type="number" id="clipStart" min="0" step="0.1" value="0"></div><div><label>End second</label><input type="number" id="clipEnd" min="0.1" step="0.1" value="30"></div></div><div class="row"><button onclick="createClip()" id="clipBtn">Make vertical clip</button></div><div id="clipStatus" class="muted"></div><div id="clipLink"></div><div class="help muted">Nothing is uploaded to YouTube automatically. Videos need your approval and a connected publishing integration.</div>
+<hr style="border:0;border-top:1px solid #303b50;margin:26px 0">
+<h2>Licensed streamer clips</h2>
+<p class="muted">Attach a local file and record permission to edit and redistribute it. The source link is saved as a reference.</p>
+<form id="streamerClipForm">
+  <label for="streamerFile">Source video</label><input type="file" id="streamerFile" accept="video/*" required>
+  <div class="row">
+    <div><label for="streamerCreator">Creator</label><input id="streamerCreator" minlength="3" maxlength="100" required></div>
+    <div><label for="streamerSource">Source link</label><input type="url" id="streamerSource" maxlength="2048" required></div>
+  </div>
+  <label for="streamerPermission">Permission record or agreement reference</label>
+  <input id="streamerPermission" minlength="3" maxlength="500" required>
+  <div class="row">
+    <div><label for="streamerScope">Permission scope</label>
+      <select id="streamerScope" required><option value="">Choose permission scope</option><option value="edit-and-repost">Edit and redistribute</option><option value="commercial-edit-and-repost">Commercial editing and redistribution</option></select></div>
+    <div><label for="streamerAnchor">Horizontal crop</label>
+      <select id="streamerAnchor"><option value="center">Center</option><option value="left">Left</option><option value="right">Right</option></select></div>
+  </div>
+  <div class="row">
+    <div><label for="streamerStart">Start (seconds)</label><input type="number" id="streamerStart" value="0" min="0" step="any" required></div>
+    <div><label for="streamerEnd">End (seconds)</label><input type="number" id="streamerEnd" value="15" min="3" step="any" required></div>
+  </div>
+  <button id="streamerPreviewButton" type="submit">Render clip preview</button>
+</form>
+<div id="streamerPreviewOutput" aria-live="polite"></div>
+</section><section class="panel assist-panel" data-view-panel="assistant" id="assistant-panel" style="max-width:1100px;margin:0 auto 30px"><span class="eyebrow">OWNER APPROVAL</span><h2>ChatGPT + YouTube handoff</h2><p class="muted">Start with an approved video from Review Library. Download the publishing kit and upload in YouTube Studio, or use a connected tool that can prepare a draft. Confirm visibility and publish in that service.</p><label for="assistTitle">Video title</label><input id="assistTitle" placeholder="Choose a finished video from Library, or enter a title"><label for="assistDesc">Description</label><textarea id="assistDesc" placeholder="Paste or edit the video description"></textarea><label for="assistNotes">What should ChatGPT help with?</label><select id="assistNotes"><option value="Review this video and improve its title, description, and hook">Review and optimize</option><option value="Prepare a YouTube Shorts publishing draft for ShadowChronicles and show it to me for approval">Prepare publishing draft</option><option value="Suggest improvements to the next three episodes">Plan follow-up stories</option></select><div class="row"><a class="button" href="https://studio.youtube.com/" target="_blank" rel="noopener noreferrer">Open YouTube Studio</a><button onclick="copyAssistantRequest()">Copy request for ChatGPT</button><button class="subtle" onclick="switchView('library')">Choose video from Library</button></div><div class="help muted" id="assistStatus">To send a completed MP4 to ChatGPT, attach the downloaded file in your chat after copying the request. A separate read-only private MCP connector is included in v0.20. It must be configured and connected from ChatGPT on web; it does not send messages into this conversation automatically.</div><div class="help"><strong>Download and upload workflow</strong><p>Open a completed video in Library, run its quality check, and mark it approved. Download the publishing kit for the MP4, captions when available, and the title and description. Use YouTube Studio or a connected uploader.</p><p class="muted">Optional private link handoff: configure S3-compatible storage in .env, then approve a video and click Generate private video link. Or enable auto-upload on approval. No tokens are included in any exported package.</p></div><h3 style="margin-top:26px">Bring a ChatGPT story into Shadow Studio</h3><p class="muted">Ask ChatGPT to write a story as JSON using this format: <code>{"title":"...","lines":[{"speaker":"Me","text":"..."}]}</code>. Paste its response here, then import the editable dialogue into Create.</p><textarea id="assistantImport" placeholder='{"title":"My shocking story","lines":[{"speaker":"Me","text":"You won’t believe this..."}]}'></textarea><div class="row"><button class="subtle" onclick="importAssistantStory()">Import story JSON</button></div><h3 style="margin-top:26px">Publishing draft queue</h3><p class="muted">Select a finished video in Library, approve it after the quality check, then return here to stage its title and description. Nothing will upload to YouTube.</p><label for="draftVideoId">Approved video ID</label><input id="draftVideoId" placeholder="Choose a video in Library first" readonly><label for="draftPrivacy">Desired YouTube visibility</label><select id="draftPrivacy"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public — still a draft only</option></select><div class="row"><button onclick="stagePublishingDraft()">Save publishing draft</button><button class="subtle" onclick="refreshPublishingDrafts()">Refresh drafts</button></div><div class="help" id="draftFeedback">Drafts are stored locally; no platform account is connected.</div><div id="draftQueue" class="muted"></div><h3 style="margin-top:26px">Publishing safety</h3><p class="muted">Draft → Review → Explicit approval → Publish using your connected YouTube/vidIQ service. No auto-publication or stored YouTube credentials in this release.</p></section><script>
 
 
 
 async function generateAIImage(){try{renderToolOutput('aiImageOutput','Contacting local image model...');const d=await api('/api/ai-image',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:el('aiImagePrompt').value})});const root=el('aiImageOutput');root.replaceChildren();const img=document.createElement('img');img.src=d.image_url;img.alt='Generated illustration';img.style='width:100%;max-width:320px;border-radius:12px';root.append(img);const note=document.createElement('p');note.textContent='Image generated on your computer. Download or animate it using Image Motion.';root.append(note);const a=document.createElement('a');a.href=d.image_url;a.textContent='Open generated image';a.target='_blank';root.append(a)}catch(e){renderToolOutput('aiImageOutput','Generator unavailable: '+e.message+'. Install and run Stable Diffusion WebUI with API enabled first.')}}
 async function toolUpload(element){const f=el(element).files[0];if(!f)throw new Error('Choose a video file first');const form=new FormData();form.append('file',f);return await api('/api/upload-background',{method:'POST',body:form})}
 function renderToolOutput(id,message,url){let root=el(id);root.replaceChildren();const p=document.createElement('p');p.textContent=message;root.append(p);if(url){const a=document.createElement('a');a.href=url;a.textContent='Download MP4';a.className='button';a.setAttribute('download','');root.append(a);const v=document.createElement('video');v.src=url;v.controls=true;v.playsInline=true;v.preload='metadata';root.append(v)}}
+
+let streamerUpload;
+document.getElementById('streamerClipForm').addEventListener('submit',async event=>{
+ event.preventDefault();
+ const button=el('streamerPreviewButton');
+ const start=Number(el('streamerStart').value),end=Number(el('streamerEnd').value);
+ button.disabled=true;
+ try {
+   if(end-start<3||end-start>60)throw Error('Choose a 3–60-second clip.');
+   renderToolOutput('streamerPreviewOutput','Uploading local source…');
+   const file=el('streamerFile').files[0];
+   if(!streamerUpload||streamerUpload.file!==file){
+     streamerUpload={file,source:await toolUpload('streamerFile')};
+   }
+   const source=streamerUpload.source;
+   renderToolOutput('streamerPreviewOutput','Rendering and checking the vertical preview…');
+   const preview=await api('/api/streamer-clips/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      background_name:source.name,creator:el('streamerCreator').value,source_url:el('streamerSource').value,
+      permission_reference:el('streamerPermission').value,license_scope:el('streamerScope').value,
+      start_seconds:start,end_seconds:end,anchor:el('streamerAnchor').value
+   })});
+   renderToolOutput('streamerPreviewOutput','Preview ready for review.',preview.video_url);
+ } catch(error) {
+   renderToolOutput('streamerPreviewOutput','Clip error: '+error.message);
+ } finally {
+   button.disabled=false;
+ }
+});
 async function clipSource(fileId,urlId,rightsId){const f=el(fileId).files[0];if(f){const form=new FormData();form.append('file',f);return await api('/api/upload-background',{method:'POST',body:form});}const url=el(urlId).value.trim();if(!url)throw Error('Upload a video or enter a YouTube / Twitch link');return await api('/api/import-video-url',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,rights_confirmed:el(rightsId).checked})});}
 async function analyzeScenes(){try{renderToolOutput('sceneOutput','Uploading and analyzing video...');const u=await clipSource('sceneFile','sceneUrl','sceneRights');const r=await api('/api/scene-suggestions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({background_name:u.name})});renderToolOutput('sceneOutput',r.scene_changes.length?'Suggested cut positions: '+r.scene_changes.map(t=>t+'s').join(', '):'No scene changes found. You may trim clips manually.')}catch(e){renderToolOutput('sceneOutput','Error: '+e.message)}}
 async function exportAutoClips(){try{const mode=el('sceneMode').value;const length=Number(el('sceneLength').value);if(!Number.isInteger(length)||length<3||length>(mode==='single'?30:10))throw Error('Duration is outside the selected limit');renderToolOutput('sceneOutput','Importing and preparing your clips...');const u=await clipSource('sceneFile','sceneUrl','sceneRights');const r=await api('/api/auto-clips',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({background_name:u.name,length,count:mode==='single'?1:3})});const root=el('sceneOutput');root.replaceChildren();for(const clip of r.clips){const a=document.createElement('a');a.className='button';a.href=clip.video_url;a.download='';a.textContent='Download clip '+clip.start+'s – '+clip.end+'s';root.append(a)}const p=document.createElement('p');p.textContent=r.note;root.append(p)}catch(e){renderToolOutput('sceneOutput','Error: '+e.message)}}

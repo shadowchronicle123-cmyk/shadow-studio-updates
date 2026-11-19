@@ -40,4 +40,8 @@ Store separate content identifiers and per-format counters while using the **sam
 6. Consider automated source monitoring only for creators and sources with documented reuse rights and supported platform access.
 
 ## Current status
-**Design/acceptance plan only.** No streamer clip ingestion, download, editing, analytics, or publishing is implemented by this document.
+The **Licensed streamer clips** workspace in **Automation & Media Tools** accepts a local file with a creator, source URL, permission reference, and explicit editing and redistribution scope. It saves the source identity and selected time range in the local projects ledger and checks for duplicate intake. Preview rendering rechecks the source bytes, crops to 1080×1920 with left, center, or right framing, normalizes audio, and verifies the export before showing a player and MP4 download.
+
+The recorded scope is the operator's declaration. Keep the actual license or permission evidence and confirm whether the planned use is commercial. The source link is a reference, and this workflow does not fetch or publish it.
+
+Local acceptance covered a real preview with synthetic footage, dimension/frame/audio checks, duplicate records, invalid permission, and a source changed after intake. Remaining work includes source approval management, highlight scoring, facecam and gameplay tracking, accurate animated captions, preview history, and Analytics ingestion. Keep clip uploads behind review until those gates pass.
