@@ -1,6 +1,12 @@
 name: Shadow Studio cloud video rendering test
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/cloud-render-test.yml'
+      - 'src/shadow-studio/production_smoke_test.py'
+      - 'src/shadow-studio/private_upload_test.py'
+      - 'src/shadow-studio/authorize_youtube_web_test.py'
 
 permissions:
   contents: read
