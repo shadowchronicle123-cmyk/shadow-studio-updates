@@ -18,16 +18,17 @@ with tempfile.TemporaryDirectory() as folder:
     )
     def frame_hashes(overlay):
         cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
-               "-f", "lavfi", "-i", "color=c=black:s=540x960:r=5:d=1",
+               "-f", "lavfi", "-i", "color=c=black:s=540x960:r=5:d=1.4",
                "-vf", "subtitles=captions.ass" if overlay else "null",
-               "-frames:v", "4", "-f", "framemd5", "-"]
+               "-frames:v", "7", "-f", "framemd5", "-"]
         proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, timeout=60)
         if proc.returncode:
             raise AssertionError("FFmpeg render failed: " + proc.stderr[-2000:])
         hashes = [line for line in proc.stdout.splitlines() if line and not line.startswith("#")]
-        assert len(hashes) == 4, hashes
+        assert len(hashes) == 7, hashes
         return hashes
     baseline = frame_hashes(False)
     captioned = frame_hashes(True)
-    assert baseline != captioned, "ASS captions produced no visible video changes"
-print("PASS real FFmpeg/libass word captions alter rendered frames offline")
+    assert all(a.split(",")[-1] != b.split(",")[-1] for a, b in zip(baseline[:3], captioned[:3])), "Caption missing during speech"
+    assert all(a.split(",")[-1] == b.split(",")[-1] for a, b in zip(baseline[-2:], captioned[-2:])), "Caption persists after speech"
+print("PASS real FFmpeg/libass captions appear during speech and disappear afterward")
