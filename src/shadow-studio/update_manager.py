@@ -6,10 +6,10 @@ An external launcher performs the update while the web server is stopped.
 from __future__ import annotations
 import hashlib, io, json, os, re, shutil, sys, tempfile, urllib.parse, urllib.request, zipfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 ROOT = Path(__file__).resolve().parent
-VERSION = '0.39.0'
+VERSION = '0.40.0'
 PRESERVE = {'.env', '.venv', 'outputs', 'projects', 'uploads', 'gameplay', 'clips', 'media', 'backups', 'update_backups', 'config.json'}
 MANIFEST_LIMIT = 32768
 ZIP_LIMIT = 80 * 1024 * 1024
@@ -70,6 +70,17 @@ def check(feed=None):
     except (ValueError,KeyError,TypeError,UpdateError) as exc:
         raise UpdateError('Invalid or unavailable update feed: '+str(exc)) from exc
 
+def _replace_file(source, destination):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(prefix='.shadow-update-', dir=destination.parent, delete=False) as file:
+        temporary = Path(file.name)
+    try:
+        shutil.copy2(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def apply(feed=None):
     """Update code only; rollback edited files on failure. Run with app STOPPED."""
     feed=feed or feed_url()
@@ -87,23 +98,42 @@ def apply(feed=None):
         with zipfile.ZipFile(io.BytesIO(data)) as bundle:
             listed=bundle.infolist()
             if not listed or len(listed)>500: raise UpdateError('Invalid release archive')
+            seen = set()
             for entry in listed:
                 if entry.is_dir():continue
                 raw=entry.filename.replace('\\','/')
-                parts=Path(raw).parts
-                if parts and parts[0]=='shadow-studio':parts=parts[1:]
-                if not parts or any(p in ('..','.') for p in parts) or Path(*parts).is_absolute():
+                parts = PurePosixPath(raw).parts
+                if parts and parts[0] == 'shadow-studio':
+                    parts = parts[1:]
+                if (not parts or PurePosixPath(raw).is_absolute() or PureWindowsPath(raw).drive
+                    or any(part in ('..', '.') or ':' in part or part.rstrip(' .') != part
+                           or PureWindowsPath(part).is_reserved() for part in parts)):
                     raise UpdateError('Unsafe archive path')
-                rel=Path(*parts)
-                if rel.parts[0] in PRESERVE or rel.name in PRESERVE or rel.suffix.lower() not in ('.py','.bat','.md','.txt','.html','.css','.js','.jpg','.png','.json'):
+                rel = Path(*parts)
+                normalized = tuple(part.casefold() for part in parts)
+                if any(part in PRESERVE for part in normalized) or rel.suffix.lower() not in ('.py','.bat','.md','.txt','.html','.css','.js','.jpg','.png','.json'):
                     continue
+                if normalized in seen:
+                    raise UpdateError('Duplicate application file in release')
+                seen.add(normalized)
                 if entry.file_size>10*1024*1024:raise UpdateError('Oversized application file')
                 # ZIP Unix symlinks must not be followed.
                 if (entry.external_attr>>16)&0o170000==0o120000:raise UpdateError('Release contains symlinks')
                 target=staging/rel;target.parent.mkdir(parents=True,exist_ok=True)
                 with bundle.open(entry) as src, target.open('wb') as dst:shutil.copyfileobj(src,dst)
-        if not (staging/'app.py').is_file() or not (staging/'renderer.py').is_file():raise UpdateError('Release is missing app.py or renderer.py')
-        touched=[]; backup=ROOT/'update_backups'/datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+        required = ('app.py', 'renderer.py', 'update_manager.py')
+        if any(not (staging / name).is_file() for name in required):
+            raise UpdateError('Release is missing required application files')
+        update_source = (staging / 'update_manager.py').read_text(encoding='utf-8')
+        match = re.search(r'''(?m)^VERSION\s*=\s*['"](\d+\.\d+\.\d+)['"]''', update_source)
+        if not match or _version(match[1]) != _version(version):
+            raise UpdateError('Release archive version does not match its manifest')
+        for path in staging.rglob('*.py'):
+            try:
+                compile(path.read_bytes(), str(path.relative_to(staging)), 'exec')
+            except SyntaxError as exc:
+                raise UpdateError(f'Release contains an incompatible Python file: {path.name}') from exc
+        touched=[]; backup=ROOT/'update_backups'/datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
         backup.mkdir(parents=True,exist_ok=False)
         try:
             for source in staging.rglob('*'):
@@ -111,9 +141,8 @@ def apply(feed=None):
                 rel=source.relative_to(staging);dest=ROOT/rel
                 if dest.exists():
                     b=backup/rel;b.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(dest,b)
-                dest.parent.mkdir(parents=True,exist_ok=True)
-                tmp=dest.with_name(dest.name+'.update-tmp')
-                shutil.copy2(source,tmp);os.replace(tmp,dest);touched.append(rel)
+                _replace_file(source, dest)
+                touched.append(rel)
         except Exception:
             for rel in reversed(touched):
                 old=backup/rel

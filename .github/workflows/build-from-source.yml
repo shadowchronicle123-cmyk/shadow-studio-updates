@@ -41,6 +41,7 @@ jobs:
           python self_test.py
           python production_smoke_test.py
           python audio_mix_test.py
+          python update_manager_test.py
 
   build:
     needs: windows-smoke
@@ -48,6 +49,7 @@ jobs:
     outputs:
       publish: ${{ steps.package.outputs.publish }}
       version: ${{ steps.package.outputs.version }}
+      sha256: ${{ steps.package.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -71,6 +73,7 @@ jobs:
           python integration_test.py
           python production_smoke_test.py
           python audio_mix_test.py
+          python update_manager_test.py
           python integration_acceptance_v027.py
           python batch_render_test.py
       - name: Test, package, and verify release
@@ -137,6 +140,7 @@ jobs:
           manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               out.write("publish=true\n")
+              out.write("sha256=" + digest + "\n")
           PY
       - name: Commit verified ZIP and manifest
         if: steps.package.outputs.publish == 'true'
@@ -164,3 +168,25 @@ jobs:
       - name: Deploy verified update feed
         id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: Verify public ZIP and publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_SHA256: ${{ needs.build.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          filename="shadow-studio-v${RELEASE_VERSION}-source.zip"
+          base="https://shadowchronicle123-cmyk.github.io/shadow-studio-updates"
+          curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 4 "$base/$filename" -o "$filename"
+          printf '%s  %s\n' "$RELEASE_SHA256" "$filename" | tee "$filename.sha256"
+          sha256sum --check "$filename.sha256"
+          unzip -tq "$filename"
+          tag="v$RELEASE_VERSION"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            exit 0
+          fi
+          gh release create "$tag" "$filename" "$filename.sha256" --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "Shadow Studio $tag" \
+            --notes "Verified Windows application package. See the included release notes for full changes."
