@@ -24,3 +24,11 @@ Development branch: `production-overhaul-v042`. Public baseline: v0.41.0 at `6ab
 3. Run real browser and Windows acceptance. Exercise an isolated install and rollback from the published v0.41.0 package. Open the release PR with checks and remaining external verification clearly identified.
 
 No owner credentials, transfers to a live bucket, paid generation, or public publishing are authorized for testing. Live services require the owner’s environment and permission.
+
+## Checkpoint 2 — handoff
+
+- Optional cloud uploads now show check, transfer and completion states. Retries are explicit, concurrent clicks reuse the same upload, and no credentials or signed links are written into status files.
+- Added local configuration instructions and a read-only bucket access test. The primary path is an approved, local publishing kit with an explicit YouTube Studio link.
+- Approval is checked before transfer, after transfer, and before an in-session link is shown. A cloud link already shared outside the app lasts until expiry or revocation at the provider.
+- Local tests passed for missing setup, read-only probe, simulated failure and retry, progress, duplicate upload prevention, revoked approval, and local approved MP4/SRT kit export.
+- Next production blockers are animated conversation layout, adjusted gameplay framing, UI flow, and branch CI with Windows/browser acceptance. Actual cloud/vidIQ account testing remains unexecuted.
