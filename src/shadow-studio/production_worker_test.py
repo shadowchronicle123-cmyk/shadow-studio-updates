@@ -68,6 +68,9 @@ def main(real=False):
         assert 30 <= record['duration'] <= 60
         assert record['attempts']==2 or real
         assert (controls/record['artifact']).is_file()
+        with patch.dict('os.environ',{'SHADOW_PRODUCTION_STATE':str(controls)}):
+            downloaded = TestClient(app.app).get('/api/production/render/2026-11-19')
+            assert downloaded.status_code == 200 and downloaded.content == (controls/record['artifact']).read_bytes()
         assert worker.run_day(controls,IDEAS,media,day='2026-11-19',**options)=='daily_limit'
         state,plan = worker.reserve(controls,'2026-11-20',IDEAS,selected)
         assert state=='reserved' and plan[0]==IDEAS[1] and plan[2]==selected[1] and plan[1]!=worker.VOICES[0]

@@ -401,6 +401,26 @@ def production_dashboard():
     return {'configured':bool(path), **(status(path) if path else {'jobs':[],'stopped':True})}
 
 
+@app.get('/api/production/render/{day}')
+def production_render(day: str):
+    from datetime import date
+    from production_worker import ledger
+    root = production_state_path()
+    try:
+        canonical = date.fromisoformat(day).isoformat()
+    except ValueError:
+        raise HTTPException(404,'Daily export not found')
+    if not root or day != canonical:
+        raise HTTPException(404,'Daily export not found')
+    with ledger(root) as db:
+        row = db.execute("SELECT artifact FROM jobs WHERE day=? AND state='ready'", (day,)).fetchone()
+    expected = f'renders/{day}/short.mp4'
+    movie = Path(root)/expected
+    if row is None or row['artifact'] != expected or not movie.is_file():
+        raise HTTPException(404,'Daily export not found')
+    return FileResponse(movie,media_type='video/mp4',filename=f'ShadowChronicles-{day}.mp4')
+
+
 class ProductionControl(BaseModel):
     stopped: bool
 
@@ -1412,7 +1432,15 @@ async function refreshProduction(){
   const jobs=el('productionJobs');jobs.replaceChildren();
   for(const job of result.jobs){
    const row=document.createElement('p');
-   row.textContent=[job.day,job.title||job.state,job.message,job.attempts+' attempt(s)'].join(' · ');
+   row.textContent=[job.day,job.title||job.state,job.message,job.attempts+' attempt(s)',job.upload_state||'',job.video_id||''].join(' · ');
+   if(job.state==='running')row.append(document.createTextNode(' · '+job.progress+'%'));
+   if(job.state==='ready'){
+    const download=document.createElement('a');
+    download.textContent=' Download MP4';
+    download.href='/api/production/render/'+encodeURIComponent(job.day);
+    download.download='';
+    row.append(download);
+   }
    jobs.append(row);
   }
  }catch(error){el('productionSummary').textContent=error.message}

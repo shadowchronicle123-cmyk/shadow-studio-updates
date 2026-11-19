@@ -42,6 +42,9 @@ def ledger(root):
                 message TEXT NOT NULL DEFAULT '', fingerprint TEXT UNIQUE,
                 duration REAL, artifact TEXT
             )''')
+            db.execute('''CREATE TABLE IF NOT EXISTS private_uploads (
+                day TEXT PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, state TEXT NOT NULL, video_id TEXT
+            )''')
             yield db
     finally:
         db.close()
@@ -57,7 +60,10 @@ def status(root):
         return {'stopped':bool(db.execute('SELECT stopped FROM control').fetchone()[0]),
                 'daily_limit':1, 'paid_provider_limit_usd':0,
                 'jobs':[dict(row) for row in db.execute(
-                    'SELECT day,state,title,attempts,progress,message,duration,artifact FROM jobs ORDER BY day DESC LIMIT 60')]}
+                    '''SELECT jobs.day,jobs.state,title,attempts,progress,message,duration,artifact,
+                       private_uploads.state AS upload_state, video_id FROM jobs
+                       LEFT JOIN private_uploads ON jobs.day=private_uploads.day
+                       ORDER BY jobs.day DESC LIMIT 60''')]}
 
 
 def _hash(text):
