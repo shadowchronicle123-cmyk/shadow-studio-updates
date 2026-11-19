@@ -244,8 +244,9 @@ def main():
     if args.command == 'run':
         if args.ideas is None or args.media is None:
             parser.error('run requires --ideas and --media')
+        from production_neural_voice import configured_narrator
         result = run_day(args.state,json.loads(args.ideas.read_text(encoding='utf-8')),args.media,args.timezone,
-                         invocation=os.getenv('INVOCATION_ID'))
+                         narrator=configured_narrator(), invocation=os.getenv('INVOCATION_ID'))
         print(result)
         return 1 if result=='failed' else 0
     if args.command == 'recover-service':
