@@ -351,6 +351,9 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
                 end = round(elapsed * 16000)
                 track.writeframes(b'\0\0' * (end - samples_written))
                 samples_written = end
+        # Preserve clean speech before music/effects for independent narration review.
+        narration_stem = output_dir / 'narration.wav'
+        shutil.copyfile(audio, narration_stem)
         audio = mix_audio(audio, music, cues, sum(durations), voice_volume, music_volume)
         output=output_dir/'short.mp4'
         args=['ffmpeg','-y','-loglevel','error','-i',visual,'-i',audio]
@@ -383,4 +386,4 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
         if progress:progress(85,'Finalizing voiceover and MP4')
         run(args)
         if progress:progress(100,'Video ready for review')
-        return {'path':str(output),'duration':round(sum(durations),1),'resolution':resolution,'fps':30,'captions_path':str(captions_path) if captions else None}
+        return {'path':str(output),'duration':round(sum(durations),1),'resolution':resolution,'fps':30,'captions_path':str(captions_path) if captions else None,'narration_path':str(narration_stem)}
