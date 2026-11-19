@@ -17,7 +17,13 @@ class FakeLocalModel:
         assert options["vad_filter"] is True
         return iter(segments), None
 
-assert transcribe_with_faster_whisper("permitted-local.mp4", FakeLocalModel()) == expected
+assert transcribe_with_faster_whisper("permitted-local.mp4", FakeLocalModel(), clip_duration=1.0) == expected
+try:
+    transcribe_with_faster_whisper("permitted-local.mp4", FakeLocalModel(), clip_duration=0.8)
+except ValueError:
+    pass
+else:
+    raise AssertionError("Real clip duration was not enforced in ASR adapter")
 invalid = [
     [{"words": [{"word": "no time", "start": None, "end": 0.3}]}],
     [{"words": [{"word": "late", "start": 0.8, "end": 0.9},
