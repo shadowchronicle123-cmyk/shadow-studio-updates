@@ -40,7 +40,8 @@ def verified_narration_report(root, day, manifest):
     expected_digest = manifest.get("narration_sha256")
     if not isinstance(expected_digest, str) or len(expected_digest) != 64:
         raise ValueError("Missing narration SHA-256")
-    actual_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    with path.open("rb") as audio_file:
+        actual_digest = hashlib.file_digest(audio_file, "sha256").hexdigest()
     if actual_digest != expected_digest:
         raise ValueError("Narration WAV differs from its verified export manifest")
     # The owner approves the exact audio bytes, not just a reusable voice ID.
@@ -80,7 +81,8 @@ def main():
         mp4 = mp4_source.resolve()
         if mp4_source.is_symlink() or not mp4.is_relative_to(args.state.resolve()):
             raise ValueError("Invalid verified MP4 location")
-        mp4_sha = hashlib.sha256(mp4.read_bytes()).hexdigest()
+        with mp4.open("rb") as video_file:
+            mp4_sha = hashlib.file_digest(video_file, "sha256").hexdigest()
         if mp4_sha != row['sha256']:
             raise ValueError("Finished MP4 does not match the verified export ledger")
         if os.getenv("SHADOW_APPROVED_VIDEO_SHA256", "").lower() != mp4_sha:
