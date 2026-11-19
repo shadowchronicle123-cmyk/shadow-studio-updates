@@ -19,6 +19,11 @@ def verified_narration_report(root, day, manifest):
     voice = manifest.get("voice_id")
     engine = manifest.get("engine")
     approved = manifest.get("listening_review_approved") is True
+    # The render manifest is producer-controlled. Only the owner-controlled
+    # worker allowlist may authorize a voice for unattended uploading.
+    allowlist = {value.strip() for value in os.getenv("SHADOW_APPROVED_VOICE_IDS", "").split(",") if value.strip()}
+    if not isinstance(voice, str) or voice not in allowlist:
+        raise ValueError("Narrator is not on the owner-approved voice allowlist")
     relative = manifest.get("narration_wav")
     if not isinstance(relative, str) or not relative:
         raise ValueError("Missing narration WAV")
