@@ -1,0 +1,28 @@
+name: Streamer clips offline intake QA
+
+on:
+  push:
+    branches: [feature/streamer-clips-intake]
+  pull_request:
+    paths:
+      - 'src/shadow-studio/streamer_clips.py'
+      - 'src/shadow-studio/streamer_clips_test.py'
+      - '.github/workflows/streamer-clips-qa.yml'
+  workflow_dispatch:
+
+jobs:
+  intake:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+        python: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Test offline intake and duplicate protection
+        working-directory: src/shadow-studio
+        run: python streamer_clips_test.py
