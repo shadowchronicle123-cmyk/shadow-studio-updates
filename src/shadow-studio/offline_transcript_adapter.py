@@ -40,11 +40,11 @@ def transcript_words(segments, *, clip_duration=None):
     return normalized
 
 
-def transcribe_with_faster_whisper(source, model):
+def transcribe_with_faster_whisper(source, model, *, clip_duration=None):
     """Run an already-installed local faster-whisper model with word timestamps.
 
     This function never downloads a model. Pass an initialized WhisperModel whose
     weights are already present on disk. It does not upload or publish content.
     """
     segments, _info = model.transcribe(str(source), word_timestamps=True, vad_filter=True)
-    return transcript_words(list(segments))
+    return transcript_words(list(segments), clip_duration=clip_duration)
