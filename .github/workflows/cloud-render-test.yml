@@ -5,6 +5,10 @@ on:
     paths:
       - '.github/workflows/cloud-render-test.yml'
       - 'src/shadow-studio/production_smoke_test.py'
+      - 'src/shadow-studio/production_worker.py'
+      - 'src/shadow-studio/production_worker_test.py'
+      - 'src/shadow-studio/renderer.py'
+      - 'src/shadow-studio/private_upload.py'
       - 'src/shadow-studio/private_upload_test.py'
       - 'src/shadow-studio/authorize_youtube_web_test.py'
       - 'src/shadow-studio/creator_benchmark*.py'
