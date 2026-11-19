@@ -10,6 +10,9 @@ from PIL import Image, ImageChops, ImageStat
 from captions import read_captions
 from production_smoke_test import synthetic_voice
 import renderer
+from fastapi.testclient import TestClient
+from gameplay_library import GameplayLibrary
+import app
 
 
 def run(*args):
@@ -23,6 +26,18 @@ def main():
         run('ffmpeg','-y','-loglevel','error','-f','lavfi','-i',
             'color=c=red:s=360x640:r=30:d=1,drawbox=x=0:y=320:w=360:h=320:color=blue:t=fill',
             '-c:v','libx264','-pix_fmt','yuv420p',gameplay)
+        audio_only = root/'audio-as-video.mp4'
+        run('ffmpeg','-y','-loglevel','error','-f','lavfi','-i','sine=d=2','-c:a','aac',audio_only)
+        upload_root = root/'uploads'
+        upload_root.mkdir()
+        with patch.multiple(app, UPLOADS=upload_root, GAMEPLAY=GameplayLibrary(root/'library')):
+            client = TestClient(app.app)
+            for endpoint in ('/api/gameplay','/api/upload-background'):
+                response=client.post(endpoint,files={'file':('audio.mp4',audio_only.read_bytes(),'video/mp4')})
+                assert response.status_code==400 and 'video track' in response.json()['detail']
+            response=client.post('/api/upload-background',files={'file':('gameplay.mp4',gameplay.read_bytes(),'video/mp4')})
+            assert response.status_code==200,response.text
+            assert (upload_root/response.json()['name']).is_file()
         story = {'title':'The missing guest', 'lines':[
             {'speaker':'Riley','text':'The wedding planner printed one extra place card.'},
             {'speaker':'Avery','text':'I know. It belonged to the person who signed the letter.', 'pause_before':1},
@@ -32,8 +47,9 @@ def main():
         voice_b='en-US-GuyNeural'
         with patch.object(renderer,'create_voice',side_effect=synthetic_voice) as voice:
             result = renderer.generate(story,root/'export',background=gameplay,resolution='1080p',
-                                       voice=voice_a,second_voice=voice_b,gameplay_percent=60,gameplay_anchor='bottom')
-        assert [call.args[2] for call in voice.call_args_list]==[voice_a,voice_b,voice_a]
+                                       voice=voice_a,second_voice=voice_b,primary_speaker='avery',
+                                       gameplay_percent=60,gameplay_anchor='bottom')
+        assert [call.args[2] for call in voice.call_args_list]==[voice_b,voice_a,voice_b]
         video = Path(result['path'])
         report = json.loads(run('ffprobe','-v','error','-show_streams','-of','json',video))['streams']
         picture,audio = report

@@ -11,6 +11,7 @@ for key in ('ELEVENLABS_API_KEY','SHADOW_S3_BUCKET','SHADOW_S3_ACCESS_KEY','SHAD
 import uvicorn
 import app
 import cloud_handoff
+import integration_bridge
 import renderer
 import studio_tools
 from gameplay_library import GameplayLibrary
@@ -28,6 +29,8 @@ if __name__=='__main__':
     app.UPLOADS=root/'uploads';app.UPLOADS.mkdir()
     studio_tools.PROJECTS=root/'projects';studio_tools.PROJECTS.mkdir()
     cloud_handoff.OUT=app.OUT
+    integration_bridge.OUTPUTS=app.OUT
+    integration_bridge.DRAFT_DIR=root/'publishing_drafts';integration_bridge.DRAFT_DIR.mkdir()
     app.GAMEPLAY=GameplayLibrary(root/'gameplay')
     renderer.create_voice=offline_voice
     app.create_voice=offline_voice

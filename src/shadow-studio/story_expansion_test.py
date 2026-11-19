@@ -26,6 +26,12 @@ def main():
             endings.add(lines[-1]['text'])
             avoid.append(story['variant'])
         assert len(twists) == len(endings) == 4
+        for _ in range(4):
+            extra = client.post('/api/story',json={**payload,'avoid':avoid}).json()['story']
+            assert extra['variant'] not in avoid
+            assert extra['lines'][-1]['text'] not in endings
+            avoid.append(extra['variant'])
+            endings.add(extra['lines'][-1]['text'])
         for genre in GENRES:
             short = client.post('/api/story', json={**payload, 'genre': genre, 'target': 30}).json()['story']
             long = client.post('/api/story', json={**payload, 'genre': genre, 'target': 60}).json()['story']
@@ -34,6 +40,11 @@ def main():
         assert client.post('/api/story', json={'genre': 'horror'}).status_code == 200
     with patch.dict('os.environ', {'SHADOW_OLLAMA_MODEL': ''}):
         assert client.post('/api/story', json={**payload, 'provider': 'ollama'}).status_code == 400
+    premium='elevenlabs:fakeIdentifier'
+    with patch('app.valid_voice',side_effect=AssertionError('Unapproved request checked a premium voice')):
+        assert client.post('/api/voice-preview',json={'voice':premium}).status_code==409
+        assert client.post('/api/render',json={'story':{},'second_voice':premium}).status_code==409
+        assert client.post('/api/batch-random',json={'voice':premium}).status_code==409
     print('PASS custom premise, four distinct reveals and endings, speakers, durations and provider boundaries')
 
 

@@ -1,3 +1,18 @@
+# Shadow Studio v0.42
+
+Run `start_windows.bat` in the existing install to open the local app. For an existing installation, close the running app and use `update_windows.bat` after Settings shows a verified update. Keep Python and FFmpeg on PATH.
+
+1. In **Create**, enter a premise, generate a story and review the dialogue. Regenerate to explore a different plot branch.
+2. In **Voice & Gameplay**, choose voices and footage, then preview the layout. Render a vertical MP4.
+3. In **Review Library**, watch the export, run its technical check and approve the exact video.
+4. Download the **publishing kit** and upload in YouTube Studio. If a supported uploader is connected, it can prepare a draft. Decide visibility and publish in that service.
+
+**Optional connections.** For private transfer, configure the S3 fields documented in `.env.example`, restart, then use **Settings → Private storage → Test connection**. A temporary link is readable by anyone who has the link until it expires or is revoked. The manual kit works without private storage. Configure `SHADOW_OLLAMA_MODEL` and select Ollama in Create for local model generation. Offline expansion uses authored plot branches.
+
+See [the release notes](RELEASE_NOTES_v042.md) for this version. The sections below describe earlier releases.
+
+---
+
 # Shadow Studio v0.28 — Crimson Private Beta
 
 **Latest update:** Exact-file approval checks, bulk publishing-kit safety, and preview concurrency protection. See [RELEASE_NOTES_v028.md](RELEASE_NOTES_v028.md).

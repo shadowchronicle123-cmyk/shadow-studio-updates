@@ -111,3 +111,6 @@ body>section[data-view-panel]{max-width:1080px!important;margin:24px auto!import
  body>section[data-view-panel]{margin:14px 12px!important}
  .studio-tool-grid{grid-template-columns:1fr}
 }
+
+.queue-job{padding:12px 0;border-bottom:1px solid var(--border)}
+.queue-job p{margin:5px 0;font-size:13px}

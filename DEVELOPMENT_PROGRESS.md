@@ -42,3 +42,12 @@ No owner credentials, transfers to a live bucket, paid generation, or public pub
 - The real baseline v0.41.0 ZIP and candidate ZIP were used to rehearse failure rollback and a successful upgrade in a temporary install. Source, gameplay, uploads, video and project fixtures are isolated from the user's installation.
 - This execution sandbox blocks Chromium's Unix process socket. Local JavaScript parsing passed. The branch CI runs the click-through on Windows using genuine Chromium, a local app process, fixture footage and synthetic voices. Windows CI separately tests native offline voice through SAPI.
 - **Next:** wait for branch CI, inspect browser artifacts and any failures, fix and rerun. Review the exact candidate diff and acceptance record before considering merge into the public release workflow. Live ElevenLabs and live S3/vidIQ remain outside the authorized test scope.
+
+## Checkpoint 4 — acceptance follow-up
+
+- The initial Windows run at `cd84413` passed startup, custom stories, native 1080p rendering, mixing and batch exports. Its full prelaunch step failed because the test decoded and normalized the local SRT before comparing it to the archive. The comparison now uses the original bytes. Windows acceptance and browser checks are retriggered with the corrected test.
+- Narration lets the owner select the main speaker independently of dialogue order. Projects retain the premise, provider, and selected speaker. The API rejects premium requests before they can reach a voice provider unless credit use was confirmed.
+- The one-time preview and export share the actual uploaded footage. Video-track checks reject broken and audio-only files with a clear error. The render queue shows recent jobs, progress, errors and a review action.
+- The offline engine prioritizes unused plot branches and supplies a second concrete ending for each. The wedding fixture checks eight distinct results without losing its supplied details.
+- Manual kit creation verifies the exact archived MP4 bytes against the approval hash. MP4, SRT, metadata and next steps are available without storage configuration.
+- Install rehearsal now also checks preservation of existing local draft files. The public feed remains on v0.41.0 while platform and browser acceptance runs.

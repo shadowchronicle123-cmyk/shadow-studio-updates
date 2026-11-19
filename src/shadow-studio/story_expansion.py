@@ -17,7 +17,7 @@ WEDDING = {
         "Her ex had a place card and a slot on the microphone schedule.",
         "I could deal with a chair. Why was he giving a speech?",
         "Play the voice memo I sent the planner. Listen to the whole thing.",
-        "The clip asked him to read a letter from her grandmother. It was the only recording she had of her voice.",
+        "The clip asked him to send a recording of her grandmother reading a letter. He had the only copy.",
         "I wanted to hear Grandma at the wedding. I should've told you before I called him.",
         "We played the recording ourselves. The first person I thanked after the ceremony was her.",
     ),
@@ -32,7 +32,7 @@ WEDDING = {
     "name-cards": (
         "Her ex was on the seating chart, right between the cake and the emergency exits.",
         "Why does he have a table number? And why is the table in the kitchen?",
-        "The planner imported my old party spreadsheet. Look at the row directly under his.",
+        "I did invite him, but the planner pasted in my old party spreadsheet. Look at the row under his.",
         "The next guest was our old landlord, who'd been assigned a high chair.",
         "Fine. I'll call my ex. You're explaining the high chair to our landlord.",
         "The planner printed a clean guest list. We kept the high-chair card on the fridge.",
@@ -96,6 +96,20 @@ GENERAL = {
         "I heard two knocks and let you in. At sunrise I threw the printouts away. You kept your phone off, too.",
     ),
 }
+AFTERMATH = {
+    "guest-list": "We moved his invitation to a family lunch after the honeymoon. Dad changed the seating chart himself.",
+    "speech": "Her ex sent the recording to both of us. We listened to it together before we picked a place for it in the ceremony.",
+    "deadline": "She called him, then called the planner. We each read the final guest list before we paid.",
+    "name-cards": "We called the planner. He reset the guest list, and my partner asked her ex if he'd mind sitting at an ordinary table.",
+    "timestamps": "The missing reply changed who owed whom an apology. We put the original exchange back in the chat and settled it there.",
+    "callback": "I walked to the kitchen and let the phone ring on the table. We cleared it up before either cup went cold.",
+    "receipt": "We went through the old bill together. I kept both copies and offered to send the correction myself.",
+    "witness": "They finished the sentence in one breath. I wrote down the answer, then asked if we could all talk again tomorrow.",
+    "photo": "I took the picture to the person I'd blamed. They recognized the room before I told them the date.",
+    "wrong-group": "The guest of honor laughed hardest when we read the planning thread out loud. Next year they're officially in charge.",
+    "extra-copy": "You spent the night on the couch. At daylight, we opened the door together and checked whether anyone was still waiting outside.",
+}
+
 GENRE_ARCS = {
     "horror": ("extra-copy", "witness", "callback"),
     "drama": ("witness", "timestamps", "photo"),
@@ -122,9 +136,15 @@ def expand(idea, genre, target, ending, avoid=(), rng=None):
         pool = GENERAL
         names = GENRE_ARCS[genre]
         partner = "Friend"
-    fresh = [name for name in names if name not in avoid]
-    key = rng.choice(fresh or [name for name in names if not avoid or name != avoid[-1]] or names)
+    used_arcs = {variant.split(':', 1)[0] for variant in avoid}
+    remaining_arcs = [name for name in names if name not in used_arcs]
+    available = [(name, cut) for name in names for cut in range(2) if f'{name}:{cut}' not in avoid]
+    unseen = [item for item in available if item[0] in remaining_arcs]
+    fallback = [(name, cut) for name in names for cut in range(2) if not avoid or f'{name}:{cut}' != avoid[-1]]
+    key, cut = rng.choice(unseen or available or fallback)
     hook, setup, response, twist, reaction, payoff = pool[key]
+    if cut:
+        payoff = AFTERMATH[key]
     premise_lines = []
     remaining = idea
     while remaining:
@@ -142,5 +162,5 @@ def expand(idea, genre, target, ending, avoid=(), rng=None):
     if ending == "question":
         lines.append(("Me", "What would you have said in my place?", 0))
     title = hook.rstrip(".")[:83] + " #Shorts"
-    return {"title": title, "genre": genre, "source": "offline_expansion", "variant": key,
+    return {"title": title, "genre": genre, "source": "offline_expansion", "variant": f"{key}:{cut}",
             "lines": [{"speaker": speaker, "text": line, "pause_before": pause} for speaker, line, pause in lines]}

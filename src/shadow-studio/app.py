@@ -14,11 +14,12 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from story_engine import make_story, metadata, random_story, rewrite_line
 from renderer import line_pause, generate, preview_layout
+from update_manager import VERSION as STUDIO_VERSION
 from audio_mix import line_sound
 from captions import read_captions, as_webvtt
 from voice_engine import VOICES, available_voices, valid_voice, create_voice
 from studio_tools import save_project, list_projects, get_project, clip_media, CLIPS
-from gameplay_library import GameplayLibrary
+from gameplay_library import GameplayLibrary, gameplay_duration
 from split_screen import split_screen
 from video_ranking import rank_videos
 from advanced_tools import scene_candidates, transcribe_local, edit_video, motion_from_image, MEDIA_ROOT
@@ -202,6 +203,16 @@ def download_archive(archive, filename):
     })
 
 
+def add_approved_video(archive, name, video, expected):
+    digest = hashlib.sha256()
+    with video.open('rb') as source, archive.open(name, 'w') as destination:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+            destination.write(chunk)
+    if digest.hexdigest() != expected:
+        raise HTTPException(409, 'The MP4 changed during packaging. Review and approve the current video.')
+
+
 @app.get('/api/chatgpt-handoff/{jobid}')
 def chatgpt_handoff(jobid: str):
     """Export one human-approved Short for manual attachment in ChatGPT.
@@ -217,7 +228,7 @@ def chatgpt_handoff(jobid: str):
         raise HTTPException(409, 'Video failed current technical quality check')
     if video.stat().st_size > 200 * 1024 * 1024:
         raise HTTPException(413, 'MP4 exceeds 200 MB; download video separately')
-    digest=file_digest(video)
+    digest=item['approved_video_sha256']
     captions=OUT/jobid/'captions.srt'
     manifest = {
         'schema':'shadow-studio-handoff/v1', 'id':jobid,
@@ -247,7 +258,8 @@ def chatgpt_handoff(jobid: str):
     )
     buffer=SpooledTemporaryFile(max_size=8*1024*1024)
     with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_STORED) as archive:
-        archive.write(video, 'short.mp4')
+        add_approved_video(archive, 'short.mp4', video, digest)
+        archive.writestr('YOUTUBE_METADATA.txt', f"{item.get('title','')}\n\n{item.get('description','')}\n")
         if captions.is_file():archive.write(captions,'captions.srt')
         archive.writestr('handoff.json', json.dumps(manifest,indent=2,ensure_ascii=False))
         archive.writestr('REQUEST_FOR_CHATGPT.txt',request)
@@ -274,7 +286,7 @@ def publishing_kit():
     with zipfile.ZipFile(mem,'w',compression=zipfile.ZIP_STORED) as z:
         for item,file in sorted(approved,key=lambda x:x[0].get('created_at','')):
             jid=item['id']
-            z.write(file,f'{jid}/short.mp4')
+            add_approved_video(z,f'{jid}/short.mp4',file,item['approved_video_sha256'])
             captionfile=file.parent/'captions.srt'
             if captionfile.is_file():z.write(captionfile,f'{jid}/captions.srt')
             z.writestr(f'{jid}/youtube.txt',f"TITLE: {item.get('title','')}\n\nDESCRIPTION:\n{item.get('description','')}\n")
@@ -345,12 +357,14 @@ class RenderOptions(BaseModel):
     voice:str="en-US-AriaNeural"
     voice_rate:int=Field(default=0,ge=-30,le=30)
     second_voice:str|None=None
+    primary_speaker:str|None=Field(default=None,max_length=24)
     resolution:str="720p"
     gameplay_id:str|None=None
     gameplay_percent:int=Field(default=58,ge=55,le=60)
     gameplay_anchor:Literal["top", "center", "bottom"]="center"
     pacing:Literal["snappy", "normal", "deliberate"]="normal"
     captions:bool=True
+    allow_premium:bool=False
     music_name:str|None=None
     voice_volume:int=Field(default=100,ge=25,le=150)
     music_volume:int=Field(default=22,ge=0,le=100)
@@ -367,7 +381,7 @@ def safe_style(s):
 
 @app.get('/',response_class=HTMLResponse)
 def home():
-    return HTML
+    return HTML.replace("__STUDIO_VERSION__", STUDIO_VERSION)
 
 
 @app.get('/studio.css', include_in_schema=False)
@@ -477,6 +491,10 @@ async def upload_background(file:UploadFile=File(...)):
                 size+=len(chunk)
                 if size>200*1024*1024: raise HTTPException(413,'Background limit is 200 MB')
                 dst.write(chunk)
+        await run_in_threadpool(gameplay_duration,path)
+    except ValueError as exc:
+        path.unlink(missing_ok=True)
+        raise HTTPException(400,str(exc)) from exc
     except Exception:
         path.unlink(missing_ok=True)
         raise
@@ -547,8 +565,10 @@ async def gameplay_upload(file:UploadFile=File(...), tag:str=Form('general')):
                 total+=len(chunk)
                 if total>500*1024*1024:raise HTTPException(413,'Gameplay upload limit is 500MB')
                 out.write(chunk)
-        item=GAMEPLAY.register(target,tag)
-        return item
+        return await run_in_threadpool(GAMEPLAY.register,target,tag)
+    except ValueError as exc:
+        target.unlink(missing_ok=True)
+        raise HTTPException(400,str(exc)) from exc
     except Exception:
         target.unlink(missing_ok=True)
         raise
@@ -556,6 +576,7 @@ async def gameplay_upload(file:UploadFile=File(...), tag:str=Form('general')):
 class VoicePreviewRequest(BaseModel):
     voice:str='en-US-AriaNeural'
     rate:int=Field(default=0,ge=-30,le=30)
+    allow_premium:bool=False
 
 @app.get('/api/voices')
 def voices():
@@ -576,6 +597,7 @@ def voices():
 
 @app.post('/api/voice-preview')
 def voice_preview(req:VoicePreviewRequest):
+    require_voice_consent(req.allow_premium,req.voice)
     if not valid_voice(req.voice):raise HTTPException(400,'Invalid voice')
     # A repeat preview of the same voice and rate should not charge another
     # premium synthesis request. Files are stored only on the owner's machine.
@@ -645,12 +667,22 @@ def story_rewrite_line(req: RewriteLineRequest):
         raise HTTPException(502, str(exc)) from exc
 
 
+def background_file(name):
+    if not re.fullmatch(r'background_[0-9a-f]{12}\.(mp4|mov|mkv|webm)', name):
+        raise HTTPException(400,'Invalid background')
+    path = UPLOADS/name
+    if not path.is_file():
+        raise HTTPException(404,'Background not found. Select the file again.')
+    return path
+
+
 class LayoutPreviewRequest(BaseModel):
     story: dict
     style: Literal["messages", "reddit"] = "messages"
     line_index: int = Field(default=0, ge=0, le=23)
     gameplay_id: str | None = None
     show_gameplay: bool = False
+    background_name: str | None = None
     resolution: Literal["720p","1080p"] = "720p"
     gameplay_percent: int = Field(default=58,ge=55,le=60)
     gameplay_anchor: Literal["top","center","bottom"] = "center"
@@ -661,18 +693,15 @@ def layout_preview(req: LayoutPreviewRequest):
     story = clean_render_story(req.story)
     if req.line_index >= len(story['lines']):
         raise HTTPException(400, 'Choose a dialogue line to preview')
-    clip = None
-    if req.gameplay_id:
-        try:
-            if req.gameplay_id != 'auto' or GAMEPLAY.list_clips():
-                clip = GAMEPLAY.pick(req.gameplay_id)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+    if req.background_name and req.gameplay_id:
+        raise HTTPException(400,'Choose a saved clip or a one-time upload.')
+    clip = pick_gameplay(req.gameplay_id)
+    background = background_file(req.background_name) if req.background_name else clip['path'] if clip else None
     try:
         image = preview_layout(
             story, req.line_index, req.style,
-            show_gameplay=bool(clip) or req.show_gameplay,
-            background=clip['path'] if clip else None,
+            show_gameplay=bool(background) or req.show_gameplay,
+            background=background,
             start=clip['cursor'] if clip else 0,resolution=req.resolution,
             gameplay_percent=req.gameplay_percent,gameplay_anchor=req.gameplay_anchor,
         )
@@ -681,8 +710,14 @@ def layout_preview(req: LayoutPreviewRequest):
     return Response(image, media_type='image/png', headers={'Cache-Control': 'no-store'})
 
 
+def require_voice_consent(allowed, *voices):
+    if not allowed and any(voice and voice.startswith('elevenlabs:') for voice in voices):
+        raise HTTPException(409, 'Confirm ElevenLabs credit usage before using this voice.')
+
+
 def render_settings(req):
     safe_style(req.style)
+    require_voice_consent(req.allow_premium,req.voice,req.second_voice)
     if req.resolution not in ('720p','1080p'): raise HTTPException(400,'Choose 720p or 1080p')
     if not valid_voice(req.voice):raise HTTPException(400,'Invalid voice')
     if req.second_voice and not valid_voice(req.second_voice):raise HTTPException(400,'Invalid second voice')
@@ -698,7 +733,7 @@ def render_settings(req):
         'voice_rate': req.voice_rate, 'resolution': req.resolution, 'pacing': req.pacing,
         'captions': req.captions, 'music': music, 'voice_volume': req.voice_volume,
         'music_volume': req.music_volume, 'target_seconds': req.target_seconds, 'gameplay_percent': req.gameplay_percent,
-        'gameplay_anchor': req.gameplay_anchor,
+        'gameplay_anchor': req.gameplay_anchor, 'primary_speaker':req.primary_speaker,
     }
 
 
@@ -716,15 +751,15 @@ def render(req:RenderRequest):
     settings = render_settings(req)
     story = clean_render_story(req.story)
     title, clean = story['title'], story['lines']
+    if req.primary_speaker and req.primary_speaker.strip().casefold() not in {row['speaker'].casefold() for row in clean}:
+        raise HTTPException(400, 'Choose a main voice speaker who appears in this conversation.')
     background=None
     if req.background_name and req.gameplay_id:raise HTTPException(400,'Choose a gameplay library clip or a one-time upload, not both')
     selected_gameplay = pick_gameplay(req.gameplay_id)
     if selected_gameplay:
         background = selected_gameplay['path']
     if req.background_name:
-        if not re.fullmatch(r'background_[0-9a-f]{12}\.(mp4|mov|mkv|webm)',req.background_name):raise HTTPException(400,'Invalid background')
-        background=UPLOADS/req.background_name
-        if not background.is_file():raise HTTPException(404,'Background not found')
+        background = background_file(req.background_name)
     with lock:
         if active['id'] and jobs.get(active['id'],{}).get('state')=='running':raise HTTPException(409,'A video is already rendering')
         jobid=uuid.uuid4().hex[:12]
@@ -785,11 +820,14 @@ def video(jobid:str):
 
 class ProjectRequest(BaseModel):
     title:str='Untitled'
+    idea:str=Field(default='',max_length=350)
+    provider:Literal["offline","ollama"]="offline"
     lines:list[dict]
     style:str='messages'
     voice:str='en-US-AriaNeural'
     voice_rate:int=0
     second_voice:str|None=None
+    primary_speaker:str|None=Field(default=None,max_length=24)
     resolution:str='720p'
     gameplay_id:str|None=None
     gameplay_percent:int=Field(default=58,ge=55,le=60)
@@ -819,9 +857,11 @@ def project_get(projectid:str):
 
 @app.get('/api/jobs')
 def all_jobs():
-    with lock:return {'jobs':sorted((dict(x) for x in jobs.values()),key=lambda d:d['id'],reverse=True)[:50]}
+    with lock:return {'jobs':[dict(jobs[jobid]) for jobid in list(jobs)[-50:][::-1]]}
 
 class BatchRequest(RenderOptions):
+    genre: Literal["random","horror","drama","romance","betrayal","revenge","mystery","comedy"] = "drama"
+    provider: Literal["offline","ollama"] = "offline"
     ideas: list[str] = Field(min_length=1, max_length=8)
     target: int = 45
     ending: Literal["resolved", "question"] = "resolved"
@@ -833,13 +873,14 @@ class ReadyBatchRequest(RenderOptions):
 
 class RandomBatchRequest(RenderOptions):
     count: int = Field(default=3, ge=1, le=8)
-    genre: Literal["random", "horror", "drama", "revenge", "mystery", "comedy"] = "random"
+    genre: Literal["random", "horror", "drama", "romance", "betrayal", "revenge", "mystery", "comedy"] = "random"
     target: int = 45
     ending: Literal["resolved", "question"] = "resolved"
 
 
 def start_batch(req, values, build_story, title):
     settings = render_settings(req)
+    settings['primary_speaker'] = None
     if req.gameplay_id and req.gameplay_id != 'auto':
         pick_gameplay(req.gameplay_id)
     with lock:
@@ -906,7 +947,7 @@ def batch_render(req: BatchRequest):
     ideas = [idea.strip() for idea in req.ideas]
     if any(not 3 <= len(idea) <= 350 for idea in ideas):
         raise HTTPException(400, 'Each story idea must have 3 to 350 characters')
-    return start_batch(req, ideas, lambda idea, _: make_story(idea, req.style, req.target, req.ending), 'Idea batch')
+    return start_batch(req, ideas, lambda idea, _: make_story(idea, req.style, req.target, req.ending,genre=req.genre,provider=req.provider), 'Idea batch')
 
 
 @app.post('/api/batch-ready')
@@ -1208,12 +1249,12 @@ HTML=r'''<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="
 <button type="button" class="tab" data-view="assistant" onclick="switchView('assistant')">Publishing</button>
 <button type="button" class="tab" data-view="tools" onclick="switchView('tools')">Media Tools</button>
 <button type="button" class="tab" data-view="settings" onclick="switchView('settings')">Settings</button>
-</nav><span class="version">v0.42.0</span></header>
+</nav><span class="version">v__STUDIO_VERSION__</span></header>
 <main data-view-panel="create">
 <div class="workspace-head"><div><h2>Create a Short</h2><p>Write the conversation, frame your video, then render it for review.</p></div>
 <div class="launch-metrics" aria-label="Video library totals"><div class="metric"><strong id="metricRendered">—</strong><span>Rendered</span></div><div class="metric"><strong id="metricPending">—</strong><span>To review</span></div><div class="metric"><strong id="metricApproved">—</strong><span>Approved</span></div></div></div>
 <div class="workspace"><div><div class="stage-bar" aria-label="Production stages"><button type="button" data-stage="story" aria-current="step" onclick="showStage('story')">Story</button><button type="button" data-stage="setup" onclick="showStage('setup')">Voice &amp; gameplay</button></div>
-<section class="panel" id="create-panel"><div class="section-head"><h2>Story</h2><div><label for="projects">Open saved project</label><select id="projects" onchange="loadProject()"><option value="">Choose a project…</option></select></div></div><details class="help"><summary>Start with a finished example</summary><div id="starterList" class="row"></div></details><label for="idea">Story idea</label><textarea id="idea" maxlength="350" placeholder="My girlfriend invited her ex to our wedding."></textarea><div class="mini-grid"><div><label for="style">Video style</label><select id="style"><option value="messages">Animated text message story</option><option value="reddit">Reddit-style story</option></select></div><div><label for="target">Target story length</label><select id="target"><option value="30">30 seconds</option><option value="45" selected>45 seconds</option><option value="60">60 seconds</option></select></div><div><label for="genre">Story genre</label><select id="genre"><option value="random">Random</option><option value="horror">Horror</option><option value="drama">Drama</option><option value="romance">Romance</option><option value="betrayal">Betrayal</option><option value="revenge">Revenge</option><option value="mystery">Mystery</option><option value="comedy">Comedy</option></select></div><div><label for="storyProvider">Custom story engine</label><select id="storyProvider"><option value="offline">Offline expansion · free</option><option value="ollama">Ollama · local AI (optional)</option></select></div></div><label for="ending">Ending</label><select id="ending"><option value="resolved">Story resolution</option><option value="question">Resolution + audience question</option></select><div class="row"><button onclick="createStory()" id="storyBtn">Generate story</button><button type="button" id="regenerateBtn" class="subtle" onclick="createStory()" disabled>Regenerate</button><button class="subtle" onclick="createStory(true)" id="randomStoryBtn">Generate random story</button><button onclick="quickGenerate()" id="quickBtn">Quick render</button></div><p class="muted">Offline expansion uses authored plot branches. Local Ollama is optional and needs a model on this PC.</p><div id="editor"><h3>Dialogue</h3><label for="title">Video title</label><input id="title" maxlength="95"><div id="lines"></div><button class="subtle" onclick="addLine()">+ Add dialogue line</button><div class="row"><button class="subtle" onclick="saveProject()">Save project</button><button type="button" onclick="showStage('setup')">Continue to video setup</button></div></div></section><section class="panel" id="production-panel" hidden><h2>Voice &amp; gameplay</h2><label for="voice">Narrator voice</label><select id="voice"><option value="en-US-AriaNeural">Aria — conversational woman (US)</option><option value="en-US-JennyNeural">Jenny — friendly woman (US)</option><option value="en-US-MichelleNeural">Michelle — warm woman (US)</option><option value="en-US-GuyNeural">Guy — storyteller man (US)</option><option value="en-US-DavisNeural">Davis — deeper man (US)</option><option value="en-US-ChristopherNeural">Christopher — announcer man (US)</option><option value="en-GB-SoniaNeural">Sonia — woman (British)</option><option value="en-GB-RyanNeural">Ryan — man (British)</option><option value="windows-default">Windows voice — offline fallback</option></select><p class="muted">Preview each voice before rendering. ElevenLabs voices can use credits.</p><label for="secondVoice">Second character voice</label><select id="secondVoice"><option value="en-US-GuyNeural">Guy — storyteller man (US)</option><option value="en-US-DavisNeural">Davis — deeper man (US)</option><option value="en-US-JennyNeural">Jenny — friendly woman (US)</option><option value="en-US-AriaNeural">Aria — conversational woman (US)</option></select><p class="muted">The first speaker uses the main voice. Other speakers use the second voice.</p><label for="voiceRate">Speaking speed</label><select id="voiceRate"><option value="-15">Slower</option><option value="0" selected>Normal</option><option value="10">A little faster</option><option value="20">Fast</option></select><div class="row"><button class="subtle" id="previewVoiceBtn" onclick="previewVoice()">▶ Preview main voice</button><button class="subtle" onclick="previewVoice(true)">▶ Preview second voice</button></div><audio id="voicePreview" controls preload="none" style="display:none;width:100%;margin-top:12px"></audio><div class="voice-note" id="voiceAvailability">Voice studio: loading...</div><p class="muted">Natural voices are the default and require internet. If a natural voice is unavailable, the render stops with an error instead of silently switching to a robotic voice. Always preview before rendering.</p><label class="checkboxline"><input type="checkbox" id="fitDuration" checked>Fit to target length by adjusting automatic gaps</label><label for="pacing">Dialogue pacing</label><select id="pacing"><option value="snappy">Snappy</option><option value="normal" selected>Normal</option><option value="deliberate">Deliberate</option></select><label class="checkboxline"><input type="checkbox" id="exportCaptions" checked>Export separate timed captions (.srt)</label><details class="help"><summary>Music and sound effects</summary><label for="musicTrack">Background music</label><select id="musicTrack"><option value="">No music</option></select><label for="musicFile">Import licensed audio</label><input id="musicFile" type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac"><label class="checkboxline"><input type="checkbox" id="musicLicensed">I have permission to use this track in my videos</label><button type="button" class="subtle" onclick="importMusic()">Import track</button><p class="muted" id="musicStatus" role="status"></p><label for="voiceVolume">Voice level (%)</label><input id="voiceVolume" type="number" min="25" max="150" value="100"><label for="musicVolume">Music level (%)</label><input id="musicVolume" type="number" min="0" max="100" value="22"><p class="muted">Music lowers during speech. Add a message sound, impact, or transition to any dialogue line.</p></details><label for="resolution">Export resolution (30 FPS)</label><select id="resolution"><option value="1080p" selected>1080 × 1920</option><option value="720p">720 × 1280 · faster</option></select><label for="gameplayChoice">Gameplay library (only clips you own or may use)</label><select id="gameplayChoice"><option value="">No saved gameplay</option><option value="auto">Automatic — rotate saved clips</option></select><div class="row"><button class="subtle" onclick="refreshGameplay()">Refresh gameplay library</button></div><div class="mini-grid"><div><label for="gameplayPercent">Gameplay height</label><select id="gameplayPercent"><option value="55">55%</option><option value="58" selected>58%</option><option value="60">60%</option></select></div><div><label for="gameplayAnchor">Gameplay crop</label><select id="gameplayAnchor"><option value="center">Center</option><option value="top">Top</option><option value="bottom">Bottom</option></select></div></div><label for="gameplayFile">Add gameplay to library</label><input id="gameplayFile" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska"><label for="gameplayTag">Game or category</label><input id="gameplayTag" placeholder="Minecraft parkour, GTA driving, etc."><div class="row"><button class="subtle" onclick="saveGameplay()" id="gameplaySave">Save gameplay</button></div><p class="muted" id="gameplayStatus">Saved footage is kept on this PC and reused across Shorts. Dialogue appears above gameplay, which fills the lower 58% of the video.</p><label for="background">Or upload gameplay for just this video</label><input id="background" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska"><p class="muted">Leave both blank for the original dark story layout. Saved footage takes priority over the one-time upload.</p></section></div><aside class="panel monitor" aria-label="Video preview"><div class="section-head"><h2>Preview</h2><span class="eyebrow">Vertical video</span></div><div class="row"><button onclick="showLayoutPreview(0)" id="layoutBtn" type="button" class="subtle">Preview layout</button><button onclick="renderVideo()" id="renderBtn" disabled>Render MP4</button></div><div id="status" role="status">Enter an idea to begin.</div><progress id="progress" max="100" value="0" style="display:none" aria-label="Render progress"></progress><div class="canvas"><div id="emptyMonitor">Generate a story to preview its layout here.</div><section class="help layout-preview" id="layoutPreview" hidden><div class="row"><button onclick="showLayoutPreview(-1)" id="layoutPrevious" type="button" class="subtle">Previous line</button><button onclick="showLayoutPreview(1)" id="layoutNext" type="button" class="subtle">Next line</button></div><p id="layoutStatus" class="muted" role="status"></p><img id="layoutImage" alt="Vertical dialogue layout preview" hidden></section><div id="videoSection"><video id="preview" controls playsinline></video><details id="previewCaptionReview" class="help caption-review" hidden><summary>Review caption timing</summary><div></div></details><div class="row"><a class="button" id="download" download>Download MP4</a><button type="button" onclick="reviewExport()">Review export</button><a class="button subtle" id="downloadCaptions" download>Download timed captions</a></div><label for="description">YouTube description (copy after reviewing)</label><textarea id="description" rows="7" readonly></textarea><div class="row"><button class="subtle" onclick="navigator.clipboard.writeText(document.getElementById('description').value)">Copy description</button></div></div></div></aside></div></main><section class="panel" id="integration-center" data-view-panel="settings" hidden style="max-width:1000px;margin:24px auto"><h2>Settings &amp; connections</h2><div id="health" class="muted"></div><details class="launch-checks" id="launchChecks"><summary>Render readiness</summary><div id="launchCheckItems" aria-live="polite"></div><p class="muted" id="launchCheckNote"></p><button class="subtle" onclick="checkProductionReadiness()">Run checks again</button></details><p class="muted">See which tools are configured, then run a read-only connection test. No keys are shown, no credits are used, no files are sent and nothing gets published. A green connection does not guarantee successful generation.</p><div class="row"><button type="button" class="subtle" onclick="refreshIntegrationStatus(false)">Refresh setup</button><button type="button" onclick="refreshIntegrationStatus(true)">Test provider connections</button></div><div id="integrationStatus" class="integration-health-grid" role="status" aria-live="polite">Checking available integrations…</div><section class="help" style="margin-top:18px"><h3>Connect ElevenLabs</h3><p class="muted">Use your own ElevenLabs API key. We verify it with ElevenLabs first, then store it only in the local .env file. Previewing or rendering premium narration may consume ElevenLabs credits.</p><label for="elevenKey">ElevenLabs API key</label><input id="elevenKey" type="password" autocomplete="off" placeholder="Paste your ElevenLabs API key"><button type="button" onclick="connectElevenLabs()">Connect ElevenLabs</button><div class="row"><select id="elevenVoices" aria-label="ElevenLabs voice"><option value="">Connect account to list voices</option></select><button type="button" class="subtle" onclick="saveElevenVoice()">Use selected voice</button></div><p id="elevenFeedback" class="muted">Not tested with your account yet.</p></section><section class="help" style="margin-top:18px"><h3>Private storage</h3><p class="muted">A publishing kit works on this PC. Optional S3-compatible storage creates a temporary link you can give to a supported uploader.</p><div id="handoffDiagnostics" role="status"></div><div class="row"><button type="button" class="subtle" onclick="checkHandoff(false)">Check configuration</button><button type="button" class="subtle" onclick="checkHandoff(true)">Test connection</button></div></section><section class="help" style="margin-top:18px"><h3>App Updates</h3><p class="muted">Check for verified updates without downloading a ZIP manually. Configure SHADOW_UPDATE_FEED once in .env; close the app and run update_windows.bat to install. Your work stays on this PC.</p><button type="button" class="subtle" onclick="checkShadowUpdates()">Check for updates</button><p id="shadowUpdateStatus" class="muted">Update source not yet checked.</p></section></section><section class="panel library-panel" id="library-panel" data-view-panel="library"><div class="section-head"><div><span class="eyebrow">YOUR WORKSPACE</span><h2>Review Queue & Video Library</h2><p class="muted">Review videos, approve the ones you want to publish, and download an upload kit containing MP4s and descriptions.</p></div><button class="subtle" onclick="refreshLibrary()">↻ Refresh library</button></div><div id="libraryEmpty" class="muted">Loading your completed videos…</div><div id="libraryGrid" class="library-grid"></div><div class="row"><a class="button" href="/api/publishing-kit" download>↓ Download approved upload kit</a></div><div id="libraryDetails" hidden><h3 id="libraryTitle"></h3><video id="libraryPlayer" controls playsinline preload="metadata"></video><details id="libraryCaptionReview" class="help caption-review" hidden><summary>Review caption timing</summary><div></div></details><label for="reviewState">Review decision</label><select id="reviewState"><option value="needs_review">Needs review</option><option value="needs_changes">Needs changes</option><option value="approved">Approved for upload kit</option></select><label for="reviewNotes">Review notes</label><textarea id="reviewNotes" rows="2" placeholder="Optional notes before publishing..."></textarea><div class="row"><button class="subtle" onclick="runQualityCheck()">Run video quality check</button><button id="saveReviewBtn" onclick="saveReview()">Save review decision</button></div><div class="help" id="qualityPanel" role="status">Before approving, run a technical check. A passing check does not replace watching the complete video.</div><p class="muted" id="reviewFeedback">Approval only adds the video to your upload kit. Nothing is sent to YouTube.</p><label for="libraryDescription">YouTube description</label><textarea id="libraryDescription" readonly rows="5"></textarea><div class="row"><a id="libraryDownload" class="button" download>Download video</a><a id="subtitleDownload" class="button subtle" download hidden>↓ Download captions (.srt)</a><a id="handoffDownload" class="button" download>Download publishing kit</a><button class="subtle" id="cloudHandoffBtn" onclick="createCloudHandoff()">Create private link</button><button class="subtle" onclick="navigator.clipboard.writeText(el('libraryDescription').value)">Copy description</button></div><div id="cloudHandoffResult" class="help muted" role="status" hidden></div><p id="handoffNext" class="muted"></p></div></section><section class="panel" data-view-panel="tools" id="split-panel" style="max-width:860px;margin:24px auto" hidden>
+<section class="panel" id="create-panel"><div class="section-head"><h2>Story</h2><div><label for="projects">Open saved project</label><select id="projects" onchange="loadProject()"><option value="">Choose a project…</option></select></div></div><details class="help"><summary>Start with a finished example</summary><div id="starterList" class="row"></div></details><label for="idea">Story idea</label><textarea id="idea" maxlength="350" placeholder="My girlfriend invited her ex to our wedding."></textarea><div class="mini-grid"><div><label for="style">Video style</label><select id="style"><option value="messages">Animated text message story</option><option value="reddit">Reddit-style story</option></select></div><div><label for="target">Target story length</label><select id="target"><option value="30">30 seconds</option><option value="45" selected>45 seconds</option><option value="60">60 seconds</option></select></div><div><label for="genre">Story genre</label><select id="genre"><option value="random">Random</option><option value="horror">Horror</option><option value="drama">Drama</option><option value="romance">Romance</option><option value="betrayal">Betrayal</option><option value="revenge">Revenge</option><option value="mystery">Mystery</option><option value="comedy">Comedy</option></select></div><div><label for="storyProvider">Custom story engine</label><select id="storyProvider"><option value="offline">Offline expansion · free</option><option value="ollama">Ollama · local AI (optional)</option></select></div></div><label for="ending">Ending</label><select id="ending"><option value="resolved">Story resolution</option><option value="question">Resolution + audience question</option></select><div class="row"><button onclick="createStory()" id="storyBtn">Generate story</button><button type="button" id="regenerateBtn" class="subtle" onclick="createStory()" disabled>Regenerate</button><button class="subtle" onclick="createStory(true)" id="randomStoryBtn">Generate random story</button><button onclick="quickGenerate()" id="quickBtn">Quick render</button></div><p class="muted">Offline expansion uses authored plot branches. Local Ollama is optional and needs a model on this PC.</p><div id="editor"><h3>Dialogue</h3><label for="title">Video title</label><input id="title" maxlength="95"><div id="lines"></div><button class="subtle" onclick="addLine()">+ Add dialogue line</button><div class="row"><button class="subtle" onclick="saveProject()">Save project</button><button type="button" onclick="showStage('setup')">Continue to video setup</button></div></div></section><section class="panel" id="production-panel" hidden><h2>Voice &amp; gameplay</h2><label for="voice">Narrator voice</label><select id="voice"><option value="en-US-AriaNeural">Aria — conversational woman (US)</option><option value="en-US-JennyNeural">Jenny — friendly woman (US)</option><option value="en-US-MichelleNeural">Michelle — warm woman (US)</option><option value="en-US-GuyNeural">Guy — storyteller man (US)</option><option value="en-US-DavisNeural">Davis — deeper man (US)</option><option value="en-US-ChristopherNeural">Christopher — announcer man (US)</option><option value="en-GB-SoniaNeural">Sonia — woman (British)</option><option value="en-GB-RyanNeural">Ryan — man (British)</option><option value="windows-default">Windows voice — offline fallback</option></select><p class="muted">Preview each voice before rendering. ElevenLabs voices can use credits.</p><label for="secondVoice">Second character voice</label><select id="secondVoice"><option value="en-US-GuyNeural">Guy — storyteller man (US)</option><option value="en-US-DavisNeural">Davis — deeper man (US)</option><option value="en-US-JennyNeural">Jenny — friendly woman (US)</option><option value="en-US-AriaNeural">Aria — conversational woman (US)</option></select><p class="muted">Other speakers use the second voice.</p><label for="primarySpeaker">Assign main voice</label><select id="primarySpeaker"><option value="">First speaker automatically</option></select><label for="voiceRate">Speaking speed</label><select id="voiceRate"><option value="-15">Slower</option><option value="0" selected>Normal</option><option value="10">A little faster</option><option value="20">Fast</option></select><div class="row"><button class="subtle" id="previewVoiceBtn" onclick="previewVoice()">▶ Preview main voice</button><button class="subtle" onclick="previewVoice(true)">▶ Preview second voice</button></div><audio id="voicePreview" controls preload="none" style="display:none;width:100%;margin-top:12px"></audio><div class="voice-note" id="voiceAvailability">Voice studio: loading...</div><p class="muted">Natural voices are the default and require internet. If a natural voice is unavailable, the render stops with an error instead of silently switching to a robotic voice. Always preview before rendering.</p><label class="checkboxline"><input type="checkbox" id="fitDuration" checked>Fit to target length by adjusting automatic gaps</label><label for="pacing">Dialogue pacing</label><select id="pacing"><option value="snappy">Snappy</option><option value="normal" selected>Normal</option><option value="deliberate">Deliberate</option></select><label class="checkboxline"><input type="checkbox" id="exportCaptions" checked>Export separate timed captions (.srt)</label><details class="help"><summary>Music and sound effects</summary><label for="musicTrack">Background music</label><select id="musicTrack"><option value="">No music</option></select><label for="musicFile">Import licensed audio</label><input id="musicFile" type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac"><label class="checkboxline"><input type="checkbox" id="musicLicensed">I have permission to use this track in my videos</label><button type="button" class="subtle" onclick="importMusic()">Import track</button><p class="muted" id="musicStatus" role="status"></p><label for="voiceVolume">Voice level (%)</label><input id="voiceVolume" type="number" min="25" max="150" value="100"><label for="musicVolume">Music level (%)</label><input id="musicVolume" type="number" min="0" max="100" value="22"><p class="muted">Music lowers during speech. Add a message sound, impact, or transition to any dialogue line.</p></details><label for="resolution">Export resolution (30 FPS)</label><select id="resolution"><option value="1080p" selected>1080 × 1920</option><option value="720p">720 × 1280 · faster</option></select><label for="gameplayChoice">Gameplay library (only clips you own or may use)</label><select id="gameplayChoice"><option value="">No saved gameplay</option><option value="auto">Automatic — rotate saved clips</option></select><div class="row"><button class="subtle" onclick="refreshGameplay()">Refresh gameplay library</button></div><div class="mini-grid"><div><label for="gameplayPercent">Gameplay height</label><select id="gameplayPercent"><option value="55">55%</option><option value="58" selected>58%</option><option value="60">60%</option></select></div><div><label for="gameplayAnchor">Gameplay crop</label><select id="gameplayAnchor"><option value="center">Center</option><option value="top">Top</option><option value="bottom">Bottom</option></select></div></div><label for="gameplayFile">Add gameplay to library</label><input id="gameplayFile" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska"><label for="gameplayTag">Game or category</label><input id="gameplayTag" placeholder="Minecraft parkour, GTA driving, etc."><div class="row"><button class="subtle" onclick="saveGameplay()" id="gameplaySave">Save gameplay</button></div><p class="muted" id="gameplayStatus">Saved footage is kept on this PC and reused across Shorts. Dialogue appears above gameplay, which fills the lower 58% of the video.</p><label for="background">Or upload gameplay for just this video</label><input id="background" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska"><p class="muted">Leave both blank for the original dark story layout. Saved footage takes priority over the one-time upload.</p></section></div><aside class="panel monitor" aria-label="Video preview"><div class="section-head"><h2>Preview</h2><span class="eyebrow">Vertical video</span></div><div class="row"><button onclick="showLayoutPreview(0)" id="layoutBtn" type="button" class="subtle">Preview layout</button><button onclick="renderVideo()" id="renderBtn" disabled>Render MP4</button></div><div id="status" role="status">Enter an idea to begin.</div><progress id="progress" max="100" value="0" style="display:none" aria-label="Render progress"></progress><div class="canvas"><div id="emptyMonitor">Generate a story to preview its layout here.</div><section class="help layout-preview" id="layoutPreview" hidden><div class="row"><button onclick="showLayoutPreview(-1)" id="layoutPrevious" type="button" class="subtle">Previous line</button><button onclick="showLayoutPreview(1)" id="layoutNext" type="button" class="subtle">Next line</button></div><p id="layoutStatus" class="muted" role="status"></p><img id="layoutImage" alt="Vertical dialogue layout preview" hidden></section><div id="videoSection"><video id="preview" controls playsinline></video><details id="previewCaptionReview" class="help caption-review" hidden><summary>Review caption timing</summary><div></div></details><div class="row"><a class="button" id="download" download>Download MP4</a><button type="button" onclick="reviewExport()">Review export</button><a class="button subtle" id="downloadCaptions" download>Download timed captions</a></div><label for="description">YouTube description (copy after reviewing)</label><textarea id="description" rows="7" readonly></textarea><div class="row"><button class="subtle" onclick="navigator.clipboard.writeText(document.getElementById('description').value)">Copy description</button></div></div></div></aside></div></main><section class="panel" id="integration-center" data-view-panel="settings" hidden style="max-width:1000px;margin:24px auto"><h2>Settings &amp; connections</h2><div id="health" class="muted"></div><details class="launch-checks" id="launchChecks"><summary>Render readiness</summary><div id="launchCheckItems" aria-live="polite"></div><p class="muted" id="launchCheckNote"></p><button class="subtle" onclick="checkProductionReadiness()">Run checks again</button></details><p class="muted">See which tools are configured, then run a read-only connection test. No keys are shown, no credits are used, no files are sent and nothing gets published. A green connection does not guarantee successful generation.</p><div class="row"><button type="button" class="subtle" onclick="refreshIntegrationStatus(false)">Refresh setup</button><button type="button" onclick="refreshIntegrationStatus(true)">Test provider connections</button></div><div id="integrationStatus" class="integration-health-grid" role="status" aria-live="polite">Checking available integrations…</div><section class="help" style="margin-top:18px"><h3>Connect ElevenLabs</h3><p class="muted">Use your own ElevenLabs API key. We verify it with ElevenLabs first, then store it only in the local .env file. Previewing or rendering premium narration may consume ElevenLabs credits.</p><label for="elevenKey">ElevenLabs API key</label><input id="elevenKey" type="password" autocomplete="off" placeholder="Paste your ElevenLabs API key"><button type="button" onclick="connectElevenLabs()">Connect ElevenLabs</button><div class="row"><select id="elevenVoices" aria-label="ElevenLabs voice"><option value="">Connect account to list voices</option></select><button type="button" class="subtle" onclick="saveElevenVoice()">Use selected voice</button></div><p id="elevenFeedback" class="muted">Not tested with your account yet.</p></section><section class="help" style="margin-top:18px"><h3>Private storage</h3><p class="muted">A publishing kit works on this PC. Optional S3-compatible storage creates a temporary link you can give to a supported uploader.</p><div id="handoffDiagnostics" role="status"></div><div class="row"><button type="button" class="subtle" onclick="checkHandoff(false)">Check configuration</button><button type="button" class="subtle" onclick="checkHandoff(true)">Test connection</button></div></section><section class="help" style="margin-top:18px"><h3>App Updates</h3><p class="muted">Check for verified updates without downloading a ZIP manually. Configure SHADOW_UPDATE_FEED once in .env; close the app and run update_windows.bat to install. Your work stays on this PC.</p><button type="button" class="subtle" onclick="checkShadowUpdates()">Check for updates</button><p id="shadowUpdateStatus" class="muted">Update source not yet checked.</p></section></section><section class="panel library-panel" id="library-panel" data-view-panel="library"><div class="section-head"><div><span class="eyebrow">YOUR WORKSPACE</span><h2>Review Queue & Video Library</h2><p class="muted">Review videos, approve the ones you want to publish, and download an upload kit containing MP4s and descriptions.</p></div><button class="subtle" onclick="refreshLibrary()">↻ Refresh library</button></div><div id="libraryEmpty" class="muted">Loading your completed videos…</div><div id="libraryGrid" class="library-grid"></div><div class="row"><a class="button" href="/api/publishing-kit" download>↓ Download approved upload kit</a></div><div id="libraryDetails" hidden><h3 id="libraryTitle"></h3><video id="libraryPlayer" controls playsinline preload="metadata"></video><details id="libraryCaptionReview" class="help caption-review" hidden><summary>Review caption timing</summary><div></div></details><label for="reviewState">Review decision</label><select id="reviewState"><option value="needs_review">Needs review</option><option value="needs_changes">Needs changes</option><option value="approved">Approved for upload kit</option></select><label for="reviewNotes">Review notes</label><textarea id="reviewNotes" rows="2" placeholder="Optional notes before publishing..."></textarea><div class="row"><button class="subtle" onclick="runQualityCheck()">Run video quality check</button><button id="saveReviewBtn" onclick="saveReview()">Save review decision</button></div><div class="help" id="qualityPanel" role="status">Before approving, run a technical check. A passing check does not replace watching the complete video.</div><p class="muted" id="reviewFeedback">Approval only adds the video to your upload kit. Nothing is sent to YouTube.</p><label for="libraryDescription">YouTube description</label><textarea id="libraryDescription" readonly rows="5"></textarea><div class="row"><a id="libraryDownload" class="button" download>Download video</a><a id="subtitleDownload" class="button subtle" download hidden>↓ Download captions (.srt)</a><a id="handoffDownload" class="button" download>Download publishing kit</a><button class="subtle" id="cloudHandoffBtn" onclick="createCloudHandoff()">Create private link</button><button class="subtle" onclick="navigator.clipboard.writeText(el('libraryDescription').value)">Copy description</button></div><div id="cloudHandoffResult" class="help muted" role="status" hidden></div><p id="handoffNext" class="muted"></p></div></section><section class="panel" data-view-panel="tools" id="split-panel" style="max-width:860px;margin:24px auto" hidden>
 
 <div class="tool-intro"><span class="eyebrow">PRODUCTION SUITE / 04</span><h2>Cut. Caption. Create.</h2><p class="muted">A focused set of real tools for your own clips. Upload a source once per tool; every export remains on your computer. AI features that require extra engines are clearly labeled.</p></div>
 <div class="studio-tool-grid">
@@ -1290,6 +1331,7 @@ async function makeRanking(){
 }
 
 function showStage(stage){
+ if(stage==='setup')refreshSpeakerSlots();
  el('create-panel').hidden=stage!=='story';
  el('production-panel').hidden=stage!=='setup';
  for(const tab of document.querySelectorAll('[data-stage]')){
@@ -1372,6 +1414,7 @@ async function createStory(random=false){
   story.lines.forEach(line=>addLine(line.speaker,line.text,line.pause_before,line.alternate,line.sound_effect,line.sound_offset));
   el('editor').style.display='block';
   el('renderBtn').disabled=false;
+  refreshSpeakerSlots();
   setStatus('Script ready. Read through the conversation, then choose your voices and gameplay.');
   return true;
  }catch(error){setStatus('Error: '+error.message);return false}
@@ -1380,11 +1423,11 @@ async function createStory(random=false){
 
 function addLine(s='Me',t='',pause=0,alternate,effect='none',offset=0){
  const row=document.createElement('div');row.className='line';
- const speaker=document.createElement('input');speaker.value=s;speaker.maxLength=24;speaker.placeholder='Speaker';speaker.setAttribute('aria-label','Speaker');
+ const speaker=document.createElement('input');speaker.addEventListener('change',()=>refreshSpeakerSlots());speaker.value=s;speaker.maxLength=24;speaker.placeholder='Speaker';speaker.setAttribute('aria-label','Speaker');
  const dialogue=document.createElement('textarea');dialogue.rows=2;dialogue.value=t;dialogue.maxLength=240;dialogue.placeholder='Dialogue';dialogue.setAttribute('aria-label','Dialogue');
  const timing=document.createElement('label');timing.textContent='Pause before (s)';
  const seconds=document.createElement('input');seconds.type='number';seconds.min='0';seconds.max='10';seconds.step='0.1';seconds.value=pause;timing.append(seconds);
- const remove=document.createElement('button');remove.textContent='×';remove.setAttribute('aria-label','Remove line');remove.onclick=()=>row.remove();
+ const remove=document.createElement('button');remove.textContent='×';remove.setAttribute('aria-label','Remove line');remove.onclick=()=>{row.remove();refreshSpeakerSlots()};
  const order=document.createElement('div');order.className='line-order';
  for(const [direction,label] of [['up','↑'],['down','↓']]){
   const move=document.createElement('button');move.type='button';move.textContent=label;move.setAttribute('aria-label','Move line '+direction);
@@ -1458,7 +1501,7 @@ async function previewVoice(second=false){
  const select=el(second?'secondVoice':'voice');
  if(select.selectedOptions[0]?.disabled){setStatus('Choose an available voice before previewing.');return}
  if(select.value.startsWith('elevenlabs:')&&!confirm('Preview this ElevenLabs voice? This may use credits.'))return;
- let b=el('previewVoiceBtn');b.disabled=true;setStatus('Generating voice preview...');try{let r=await fetch('/api/voice-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({voice:el(second?'secondVoice':'voice').value,rate:Number(el('voiceRate').value)})});if(!r.ok){let d=await r.json();throw Error(d.detail||'Preview failed')}let blob=await r.blob();let url=URL.createObjectURL(blob);let audio=el('voicePreview');if(audio.dataset.url)URL.revokeObjectURL(audio.dataset.url);audio.src=url;audio.dataset.url=url;audio.style.display='block';await audio.play();setStatus('Voice preview ready.')}catch(e){setStatus('Voice error: '+e.message)}finally{b.disabled=false}}
+ let b=el('previewVoiceBtn');b.disabled=true;setStatus('Generating voice preview...');try{let r=await fetch('/api/voice-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({voice:el(second?'secondVoice':'voice').value,rate:Number(el('voiceRate').value),allow_premium:true})});if(!r.ok){let d=await r.json();throw Error(d.detail||'Preview failed')}let blob=await r.blob();let url=URL.createObjectURL(blob);let audio=el('voicePreview');if(audio.dataset.url)URL.revokeObjectURL(audio.dataset.url);audio.src=url;audio.dataset.url=url;audio.style.display='block';await audio.play();setStatus('Voice preview ready.')}catch(e){setStatus('Voice error: '+e.message)}finally{b.disabled=false}}
 async function quickGenerate(){
  if(el('renderBtn').disabled && el('progress').style.display==='block'){
   setStatus('Wait for the current render to finish.');
@@ -1495,12 +1538,29 @@ function confirmPremium(settings, action){
  return ![settings.voice,settings.second_voice].some(voice=>voice.startsWith('elevenlabs:')) ||
   confirm(action+' with ElevenLabs? This may use credits.');
 }
+function refreshSpeakerSlots(preferred=el('primarySpeaker').value){
+ const field=el('primarySpeaker');
+ const names=[...new Set(Array.from(el('lines').children, row=>row.children[0].value.trim()).filter(Boolean))];
+ field.replaceChildren(new Option('First speaker automatically',''));
+ for(const name of names)field.add(new Option(name,name));
+ field.value=names.includes(preferred)?preferred:'';
+}
 function productionSettings(){
  if(!el('voiceVolume').checkValidity() || !el('musicVolume').checkValidity())throw Error('Enter a voice level of 25–150% and music level of 0–100%.');
  return {style:el('style').value,voice:el('voice').value,second_voice:el('secondVoice').value,
-  voice_rate:Number(el('voiceRate').value),resolution:el('resolution').value,
+  primary_speaker:el('primarySpeaker').value||null,voice_rate:Number(el('voiceRate').value),resolution:el('resolution').value,
   gameplay_id:el('gameplayChoice').value||null,gameplay_percent:Number(el('gameplayPercent').value),gameplay_anchor:el('gameplayAnchor').value,pacing:el('pacing').value,captions:el('exportCaptions').checked,
   music_name:el('musicTrack').value||null,voice_volume:Number(el('voiceVolume').value),music_volume:Number(el('musicVolume').value)};
+}
+const localBackgrounds=new WeakMap();
+async function readyBackground(file){
+ if(!localBackgrounds.has(file)){
+  const form=new FormData();
+  form.append('file',file);
+  localBackgrounds.set(file,api('/api/upload-background',{method:'POST',body:form}));
+ }
+ try{return (await localBackgrounds.get(file)).name}
+ catch(error){localBackgrounds.delete(file);throw error}
 }
 async function renderVideo(automatic=false){
  let settings;
@@ -1519,12 +1579,11 @@ async function renderVideo(automatic=false){
   const file=settings.gameplay_id?null:el('background').files[0];
   if(file){
    setStatus('Uploading your background...');
-   const form=new FormData();form.append('file',file);
-   background=(await api('/api/upload-background',{method:'POST',body:form})).name;
+   background=await readyBackground(file);
   }else if(automatic && !settings.gameplay_id){
    settings.gameplay_id='auto';
   }
-  const request={...settings,target_seconds:el('fitDuration').checked?Number(el('target').value):null,story:{title:el('title').value,lines:editedLines()},background_name:background};
+  const request={...settings,allow_premium:true,target_seconds:el('fitDuration').checked?Number(el('target').value):null,story:{title:el('title').value,lines:editedLines()},background_name:background};
   const result=await api('/api/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
   poll(result.id);
  }catch(error){setStatus('Error: '+error.message);el('renderBtn').disabled=false}
@@ -1545,13 +1604,14 @@ async function showLayoutPreview(step){
   if(lines.length<2)throw Error('Add at least two dialogue lines before previewing.');
   const line=Math.max(0,Math.min(lines.length-1,layoutLine+step));
   const gameplayId=el('gameplayChoice').value||null;
-  const placeholder=!!el('background').files[0]&&!gameplayId;
+  const file=gameplayId?null:el('background').files[0];
   layoutBusy=true;
   el('layoutPrevious').disabled=true;el('layoutNext').disabled=true;
-  status.textContent='Drawing layout…';
+  status.textContent=file?'Preparing local gameplay preview…':'Drawing layout…';
+  const background_name=file?await readyBackground(file):null;
   const response=await fetch('/api/layout-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
    story:{title:el('title').value,lines},line_index:line,style:el('style').value,
-   gameplay_id:gameplayId,show_gameplay:placeholder,resolution:el('resolution').value,
+   gameplay_id:gameplayId,background_name,resolution:el('resolution').value,
    gameplay_percent:Number(el('gameplayPercent').value),gameplay_anchor:el('gameplayAnchor').value
   })});
   if(!response.ok){
@@ -1562,7 +1622,7 @@ async function showLayoutPreview(step){
   if(layoutUrl)URL.revokeObjectURL(layoutUrl);
   layoutUrl=preview;image.src=preview;image.hidden=false;
   layoutLine=line;
-  status.textContent='Line '+(line+1)+' of '+lines.length+(placeholder?' · One-time gameplay shown as a placeholder':'');
+  status.textContent='Line '+(line+1)+' of '+lines.length;
   el('layoutPrevious').disabled=line===0;el('layoutNext').disabled=line>=lines.length-1;
  }catch(error){
   image.hidden=true;
@@ -1605,7 +1665,7 @@ api('/api/health').then(d=>{el('lines').classList.toggle('ollama-available',Bool
 
 async function saveProject(){
  if(!el('lines').children.length){setStatus('Create a script first');return}
- try{const lines=editedLines();const d=await api('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...productionSettings(),title:el('title').value,lines,target:Number(el('target').value),fit_duration:el('fitDuration').checked,genre:el('genre').value,ending:el('ending').value})});setStatus('Project saved: '+d.title);await refreshProjects();el('projects').value=d.id}catch(e){setStatus('Could not save: '+e.message)}
+ try{const lines=editedLines();const d=await api('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...productionSettings(),title:el('title').value,idea:el('idea').value,provider:el('storyProvider').value,lines,target:Number(el('target').value),fit_duration:el('fitDuration').checked,genre:el('genre').value,ending:el('ending').value})});setStatus('Project saved: '+d.title);await refreshProjects();el('projects').value=d.id}catch(e){setStatus('Could not save: '+e.message)}
 }
 async function refreshProjects(){try{const d=await api('/api/projects');el('projects').replaceChildren(new Option('Choose a project...',''));d.projects.forEach(p=>el('projects').add(new Option(p.title,p.id)))}catch(e){setStatus('Projects: '+e.message)}}
 async function loadProject(){
@@ -1613,6 +1673,7 @@ async function loadProject(){
  try{
   const project=await api('/api/projects/'+id);
   el('title').value=project.title;
+  el('idea').value=project.idea||'';el('storyProvider').value=project.provider||'offline';
   if(project.voice)selectVoice('voice',project.voice);
   if(project.second_voice)selectVoice('secondVoice',project.second_voice);
   const fields={style:project.style,
@@ -1629,6 +1690,7 @@ async function loadProject(){
   el('musicVolume').value=project.music_volume??22;
   el('lines').replaceChildren();
   project.lines.forEach(line=>addLine(line.speaker,line.text,line.pause_before,line.alternate,line.sound_effect,line.sound_offset));
+  refreshSpeakerSlots(project.primary_speaker||'');
   el('editor').style.display='block';el('renderBtn').disabled=false;
   setStatus('Loaded saved project');
  }catch(error){setStatus(error.message)}
@@ -1655,7 +1717,7 @@ async function queueBatch(endpoint, choices){
   if(!confirmPremium(settings,'Render this entire batch'))return;
   buttons.forEach(button=>button.disabled=true);
   const target=Number(el('target').value);
-  const request={...settings,...choices,target,ending:el('ending').value,
+  const request={...settings,allow_premium:true,genre:el('genre').value,provider:el('storyProvider').value,...choices,target,ending:el('ending').value,
    target_seconds:el('fitDuration').checked?target:null};
   if(endpoint==='/api/batch-random'&&!request.gameplay_id)request.gameplay_id='auto';
   const queued=await api(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
@@ -1690,10 +1752,12 @@ async function refreshLibrary(){
 }
 let selectedReviewId=null;
 async function runQualityCheck(){
- if(!selectedReviewId)return;
+ const videoId=selectedReviewId;
+ if(!videoId)return;
  const box=el('qualityPanel');box.textContent='Checking the MP4…';
  try{
-  const q=await api('/api/library/'+selectedReviewId+'/quality');
+  const q=await api('/api/library/'+videoId+'/quality');
+  if(selectedReviewId!==videoId)return;
   const lines=[q.passed?'Technical export: OK':'Technical export: BLOCKED',
    `${q.width}×${q.height} · ${q.fps} FPS · ${q.duration_seconds}s · ${q.file_size_mb} MB`,
    `Audio track: ${q.audio_present?'Present':'Missing'}`];
@@ -1702,17 +1766,19 @@ async function runQualityCheck(){
   for(const w of q.warnings)lines.push('CHECK: '+w);
   lines.push('Listen to the entire voiceover and confirm gameplay rights before approval.');
   box.textContent=lines.join('\n');box.style.whiteSpace='pre-line';
- }catch(e){box.textContent='Could not inspect video: '+e.message}
+ }catch(e){if(selectedReviewId===videoId)box.textContent='Could not inspect video: '+e.message}
 }
 async function saveReview(){
- if(!selectedReviewId)return;
+ const videoId=selectedReviewId;
+ if(!videoId)return;
  const btn=el('saveReviewBtn');btn.disabled=true;
  try{
-  const updated=await api('/api/library/'+selectedReviewId+'/review',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:el('reviewState').value,notes:el('reviewNotes').value})});
+  const updated=await api('/api/library/'+videoId+'/review',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:el('reviewState').value,notes:el('reviewNotes').value})});
+  if(selectedReviewId!==videoId){await refreshLibrary();return}
   updateHandoffControls(updated);
   el('reviewFeedback').textContent=updated.review_status==='approved'?'Approved for handoff. Choose Download publishing kit.':'Review decision saved.';
   await refreshLibrary();
- }catch(e){el('reviewFeedback').textContent='Review save failed: '+e.message}
+ }catch(e){if(selectedReviewId===videoId)el('reviewFeedback').textContent='Review save failed: '+e.message}
  finally{btn.disabled=false}
 }
 function openLibraryItem(v){
@@ -1805,7 +1871,28 @@ async function refreshPublishingDrafts(){
    row.append(title,info);container.appendChild(row)}
  }catch(e){container.textContent=e.message}
 }
-async function refreshJobs(){try{let d=await api('/api/jobs');let list=el('jobList');list.replaceChildren();for(const j of d.jobs){if(j.title==='Batch render')continue;const r=document.createElement('div');r.style='border-bottom:1px solid #34415a;padding:10px 0';const t=document.createElement('strong');t.textContent=j.title+' — '+j.state;r.append(t);if(j.video_url){const a=document.createElement('a');a.href=j.video_url;a.textContent='  Download video';a.download='';a.style='color:#a5ccff;margin-left:12px';r.append(a)}list.append(r)}}catch(e){el('jobList').textContent=e.message}}
+async function refreshJobs(){
+ const list=el('jobList');
+ try{
+  const {jobs}=await api('/api/jobs');list.replaceChildren();
+  if(!jobs.length){list.textContent='Your renders will appear here.';return}
+  for(const job of jobs){
+   const row=document.createElement('article');row.className='queue-job';
+   const title=document.createElement('strong');title.textContent=job.title;
+   const status=document.createElement('p');status.textContent=job.message;
+   row.append(title,status);
+   if(job.state==='running'){
+    const progress=document.createElement('progress');progress.value=job.percent;progress.max=100;
+    progress.setAttribute('aria-label','Render progress');row.append(progress);
+   }
+   if(job.video_url){
+    const review=document.createElement('button');review.className='subtle';review.textContent='Review video';
+    review.onclick=async()=>{latestExportId=job.id;await reviewExport()};row.append(review);
+   }
+   list.append(row);
+  }
+ }catch(error){list.textContent=error.message}
+}
 async function createClip(){el('clipBtn').disabled=true;try{el('clipStatus').textContent='Importing...';const u=await clipSource('clipFile','clipUrl','clipRights');el('clipStatus').textContent='Trimming...';const d=await api('/api/clip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({background_name:u.name,start:Number(el('clipStart').value),end:Number(el('clipEnd').value),orientation:'vertical'})});const a=document.createElement('a');a.href=d.download_url;a.download='shadow_clip.mp4';a.textContent='Download vertical clip';a.style='color:#a5ccff';el('clipLink').replaceChildren(a);el('clipStatus').textContent='Clip ready'}catch(e){el('clipStatus').textContent='Clip error: '+e.message}finally{el('clipBtn').disabled=false}}
 function selectVoice(id, value){
  const select=el(id);

@@ -64,7 +64,7 @@ def main():
         assert report['passed'], report
         assert (report['width'], report['height'], report['fps']) == (720,1280,30)
         assert report['audio_present']
-        subtitles = (movie.parent/'captions.srt').read_text(encoding='utf-8')
+        subtitles = (movie.parent/'captions.srt').read_bytes()
         from captions import read_captions
         cues = read_captions(movie.parent/'captions.srt')
         transcript = ' '.join(' '.join(cue['text'].split()) for cue in cues)
@@ -93,7 +93,7 @@ def main():
                 manifest = json.loads(archive.read('handoff.json'))
                 assert manifest['sha256'] == hashlib.sha256(movie.read_bytes()).hexdigest()
                 assert archive.read('short.mp4') == movie.read_bytes()
-                assert archive.read('captions.srt') == subtitles.encode('utf-8')
+                assert archive.read('captions.srt') == subtitles
                 assert manifest['not_authorized_for_public_publishing'] is True
             print('PASS: unapproved videos blocked; approved MP4 and SRT handoff verified')
             # MP4 trailer edits can leave a technically valid file but still

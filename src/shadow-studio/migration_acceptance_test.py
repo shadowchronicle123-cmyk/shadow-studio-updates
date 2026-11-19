@@ -11,13 +11,13 @@ import tempfile
 from unittest.mock import patch
 import zipfile
 
-from update_manager import VERSION
+from update_manager import VERSION, _version
 
 SOURCE = Path(__file__).resolve().parent
 REPO = SOURCE.parents[1]
 BASELINE = '3c4c8d84b6d9b3736c37f6e8518a2861e6ec4c5e3add390b308d1a852c5ff587'
 FEED = 'https://example.test/latest.json'
-EXCLUDED = {'.env','.venv','__pycache__','outputs','projects','uploads','gameplay','clips','media','update_backups','node_modules'}
+EXCLUDED = {'.env','.venv','__pycache__','outputs','projects','uploads','gameplay','clips','media','update_backups','node_modules','publishing_drafts','browser-evidence'}
 
 
 def package():
@@ -33,7 +33,7 @@ def package():
 
 
 def main():
-    assert VERSION == '0.42.0'
+    assert _version(VERSION) > _version('0.41.0')
     baseline = REPO/'docs'/'shadow-studio-v0.41.0-source.zip'
     assert hashlib.sha256(baseline.read_bytes()).hexdigest() == BASELINE
     candidate = package()
@@ -54,6 +54,7 @@ def main():
             '.env':b'# local preferences test',
             'gameplay/test.mp4':b'test uploaded game',
             'uploads/song.wav':b'test music',
+            'publishing_drafts/aabbccddeeff.json':b'test local draft',
             'outputs/aabbccddeeff/short.mp4':b'test output',
             'projects/aabbccddeeff.json':b'{"id":"aabbccddeeff","title":"Saved from v0.41","lines":[{"speaker":"A","text":"A fixture line"},{"speaker":"B","text":"Another line"}]}',
         }
@@ -85,18 +86,18 @@ def main():
         assert app_path.read_bytes()==before
         assert not (target/'studio.css').exists()
         with patch.object(module,'_fetch',side_effect=[manifest,candidate]):
-            assert 'Installed 0.42.0' in module.apply(FEED)
+            assert f'Installed {VERSION}' in module.apply(FEED)
         assert all((target/name).read_bytes()==content for name,content in local_files.items())
         assert any(path.read_bytes()==before for path in (target/'update_backups').glob('*/app.py'))
-        smoke = """from fastapi.testclient import TestClient
+        smoke = f"""from fastapi.testclient import TestClient
 import app, update_manager
 client = TestClient(app.app)
-assert update_manager.VERSION == '0.42.0'
-assert client.get('/').status_code == 200 and client.get('/studio.css').status_code == 200
+assert update_manager.VERSION == {VERSION!r}
+assert 'v{VERSION}' in client.get('/').text and client.get('/studio.css').status_code == 200
 assert client.get('/api/projects/aabbccddeeff').json()['title'] == 'Saved from v0.41'
 """
         subprocess.run([sys.executable,'-c',smoke],cwd=target,check=True)
-    print('PASS verified v0.41.0 package, simulated rollback, v0.42.0 launch and local byte preservation')
+    print(f'PASS verified v0.41.0 baseline ZIP, simulated rollback, v{VERSION} launch and local byte preservation')
 
 
 if __name__=='__main__':

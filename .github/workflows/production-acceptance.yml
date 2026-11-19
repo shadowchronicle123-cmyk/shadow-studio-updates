@@ -21,6 +21,8 @@ jobs:
         os: [windows-latest, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 22
+    env:
+      PYTHONUTF8: 1
     defaults:
       run:
         working-directory: src/shadow-studio
@@ -74,9 +76,8 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           npm install --no-save --no-package-lock playwright@1.56.1
-          npx playwright install chromium
           mkdir -p browser-evidence
-          SHADOW_ARTIFACT_DIR=browser-evidence node browser_acceptance.js
+          SHADOW_BROWSER_CHANNEL=chrome SHADOW_ARTIFACT_DIR=browser-evidence node browser_acceptance.js
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows' && always()
         with:

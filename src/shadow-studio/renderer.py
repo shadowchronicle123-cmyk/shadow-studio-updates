@@ -246,7 +246,7 @@ def dialogue_holds(narration, gap, minimum_hold, target_seconds=None):
 
 
 def generate(story,output_dir,style='messages',background=None,progress=None,voice='en-US-AriaNeural',second_voice=None,voice_rate=0,resolution='720p',gameplay_start=0,*,pacing='normal',captions=True,
-             music=None,voice_volume=100,music_volume=22,target_seconds=None,gameplay_percent=58,gameplay_anchor="center"):
+             music=None,voice_volume=100,music_volume=22,target_seconds=None,gameplay_percent=58,gameplay_anchor="center",primary_speaker=None):
     gap, minimum_hold = SCENE_PACING[pacing]
     if not isinstance(story, dict) or not isinstance(story.get('lines'), list) or not 1 <= len(story['lines']) <= 24:
         raise ValueError('Story requires 1 to 24 narration scenes')
@@ -261,7 +261,7 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
     layout={'size':(out_width,out_height),'gameplay_percent':gameplay_percent if has_gameplay else 0}
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):raise RuntimeError('FFmpeg and ffprobe are required on PATH')
     output_dir=Path(output_dir);output_dir.mkdir(parents=True,exist_ok=True)
-    first_speaker=str(story['lines'][0].get('speaker','Narrator')).strip().casefold()
+    first_speaker=str(primary_speaker or story['lines'][0].get('speaker','Narrator')).strip().casefold()
     if second_voice is not None:
         from voice_engine import valid_voice
         if not valid_voice(second_voice): raise ValueError('Second character voice is unavailable')

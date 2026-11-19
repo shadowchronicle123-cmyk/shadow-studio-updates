@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 ROOT = Path(__file__).resolve().parent
 VERSION = '0.42.0'
-PRESERVE = {'.env', '.venv', 'outputs', 'projects', 'uploads', 'gameplay', 'clips', 'media', 'backups', 'update_backups', 'config.json'}
+PRESERVE = {'.env', '.venv', 'outputs', 'projects', 'uploads', 'gameplay', 'clips', 'media', 'backups', 'update_backups', 'config.json', 'publishing_drafts'}
 MANIFEST_LIMIT = 32768
 ZIP_LIMIT = 80 * 1024 * 1024
 
