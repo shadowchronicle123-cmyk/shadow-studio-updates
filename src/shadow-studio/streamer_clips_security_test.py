@@ -50,6 +50,6 @@ with tempfile.TemporaryDirectory() as folder:
     manifest.write_text(json.dumps([item]))
     assert queue(manifest, media, database)["queued"] == 1
     assert queue(manifest, media, database)["queued"] == 0
-    with sqlite3.connect(database) as db:
+    with closing(sqlite3.connect(database)) as db:
         assert db.execute("SELECT state FROM clips").fetchall() == [("review_required",)]
 print("PASS independent URL spoofing, metadata, atomicity and review-only checks")
