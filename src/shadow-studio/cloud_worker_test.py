@@ -1,5 +1,6 @@
 """Offline safety and idempotency acceptance for Phase 1."""
 import json
+from contextlib import closing
 import random
 import tempfile
 from pathlib import Path
@@ -10,7 +11,7 @@ from cloud_worker import open_db, plan_day
 
 def main():
     with tempfile.TemporaryDirectory() as directory:
-        with __import__("contextlib").closing(open_db(Path(directory) / "jobs.sqlite3")) as db:
+        with closing(open_db(Path(directory) / "jobs.sqlite3")) as db:
             with patch("story_engine._local_json", side_effect=AssertionError("External AI must not be called")):
                 first = plan_day(db, "2026-11-19", random.Random(1))
                 again = plan_day(db, "2026-11-19", random.Random(2))
@@ -26,10 +27,8 @@ def main():
                 pairs = [frozenset((job["voice_a"], job["voice_b"])) for job in jobs]
                 assert len(pairs) == len(set(pairs)), "Repeated a voice pair while alternatives remain"
                 assert all(job["state"] == "planned" for job in jobs)
-            db.close()
-        with open_db(Path(directory) / "jobs.sqlite3") as db:
+        with closing(open_db(Path(directory) / "jobs.sqlite3")) as db:
             assert db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 8
-            db.close()
     print("PASS offline story creation, SQLite persistence, daily idempotency, voice rotation, no paid providers")
 
 
