@@ -343,13 +343,27 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
         args=['ffmpeg','-y','-loglevel','error','-i',visual,'-i',audio]
         if background and Path(background).is_file():
             panel_height, gameplay_height = gameplay_dimensions(out_height)
-            filter_graph = (
-                f'[2:v]{gameplay_crop(out_width, gameplay_height)}[gameplay];'
+            crop = gameplay_crop(out_width, gameplay_height)
+            filters = []
+            if gameplay_start > 0:
+                # Seek only the first play. Subsequent plays start at frame zero.
+                args.extend(['-ss', str(gameplay_start), '-i', str(background)])
+                args.extend(['-stream_loop', '-1', '-i', str(background)])
+                filters.extend([
+                    f'[2:v]{crop},fps=30,setpts=PTS-STARTPTS[remaining]',
+                    f'[3:v]{crop},fps=30,setpts=PTS-STARTPTS[full]',
+                    '[remaining][full]concat=n=2:v=1:a=0[gameplay]',
+                ])
+            else:
+                args.extend(['-stream_loop', '-1', '-i', str(background)])
+                filters.append(f'[2:v]{crop},fps=30[gameplay]')
+            filters.extend([
                 f'[0:v]scale={out_width}:{out_height}:flags=lanczos,'
-                f'crop={out_width}:{panel_height}:0:0,setsar=1[panel];'
-                '[panel][gameplay]vstack=shortest=1,format=yuv420p[v]'
-            )
-            args.extend(['-stream_loop','-1','-ss',str(max(0,gameplay_start)),'-i',str(background),'-filter_complex_threads','1','-filter_complex',filter_graph,'-map','[v]','-map','1:a'])
+                f'crop={out_width}:{panel_height}:0:0,setsar=1[panel]',
+                '[panel][gameplay]vstack=shortest=1,format=yuv420p[v]',
+            ])
+            args.extend(['-filter_complex_threads','1','-filter_complex',';'.join(filters),
+                         '-map','[v]','-map','1:a'])
         else:
             args.extend(['-map','0:v','-map','1:a','-vf',f'scale={out_width}:{out_height}:flags=lanczos,setsar=1'])
         args+=['-r','30','-c:v','libx264','-preset','veryfast','-crf','25','-pix_fmt','yuv420p','-c:a','aac','-b:a','96k','-t',f'{sum(durations):.3f}','-movflags','+faststart',output]

@@ -47,5 +47,6 @@ class GameplayLibrary:
             for x in d:
                 if x['id']==id:
                     x['uses']+=1
-                    x['cursor']=round((x['cursor']+seconds)%max(x['duration'],1),2)
+                    duration = max(x['duration'], 1)
+                    x['cursor'] = round((x['cursor'] + seconds) % duration, 2) % duration
             self._write(d)

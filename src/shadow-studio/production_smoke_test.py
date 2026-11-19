@@ -96,6 +96,22 @@ def main():
             assert image.getpixel((10, 530))[1] < 80
             assert image.getpixel((10, 545))[1] > 200
             print('PASS landscape gameplay fills lower 58% beneath dialogue')
+            two_shots = Path(workspace) / 'two-shots.mp4'
+            run(['ffmpeg', '-y', '-loglevel', 'error', '-f', 'lavfi', '-i',
+                 'color=red:s=320x180:r=24:d=1', '-f', 'lavfi', '-i',
+                 'color=blue:s=320x180:r=24:d=1', '-filter_complex',
+                 '[0:v][1:v]concat=n=2:v=1:a=0', '-pix_fmt', 'yuv420p', str(two_shots)], check=True)
+            looped = renderer.generate(story, Path(workspace) / 'looped', background=two_shots,
+                                       gameplay_start=1.5, resolution='1080p')
+            looped_report = analyze(looped['path'])
+            assert looped_report['passed'], looped_report
+            assert (looped_report['width'], looped_report['height'], looped_report['fps']) == (1080, 1920, 30)
+            for timecode, channel in (('0.1', 2), ('0.85', 0)):
+                frame = check_output(['ffmpeg', '-loglevel', 'error', '-ss', timecode, '-i', looped['path'],
+                                      '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-threads', '1', '-'])
+                pixel = Image.frombytes('RGB', (1080, 1920), frame).getpixel((10, 1400))
+                assert pixel[channel] > 160, (timecode, pixel)
+            print('PASS 1080p gameplay starts at the cursor and loops from the beginning')
             print('QUALITY: '+json.dumps({k:report[k] for k in ['passed','width','height','fps','audio_present','duration_seconds','max_volume_db']}))
     finally:
         renderer.create_voice = original_voice
