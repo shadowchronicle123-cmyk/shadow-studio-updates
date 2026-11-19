@@ -113,11 +113,8 @@ def main(real=False):
             )
         channel = 'UC'+'X'*22
         transport = Mock()
-        transport.post.side_effect = [
-            SimpleNamespace(status_code=200,json=lambda:{'token_type':'Bearer','access_token':'test-access'}),
-            SimpleNamespace(status_code=200,headers={
-                'Location':'https://www.googleapis.com/upload/youtube/v3/videos?upload_id=test'}),
-        ]
+        transport.post.return_value = SimpleNamespace(status_code=200,headers={
+            'Location':'https://www.googleapis.com/upload/youtube/v3/videos?upload_id=test'})
         transport.get.return_value = SimpleNamespace(status_code=200,json=lambda:{'items':[{'id':channel}]})
         transport.put.return_value = SimpleNamespace(status_code=201,json=lambda:{
             'id':'example1234','snippet':{'channelId':channel},'status':{'privacyStatus':'private'}})
