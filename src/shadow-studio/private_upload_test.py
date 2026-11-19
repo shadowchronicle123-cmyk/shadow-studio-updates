@@ -64,14 +64,15 @@ def main():
         transport.put.side_effect=requests.Timeout('secret provider response')
         blocked(lambda:send(day,digest))
         blocked(lambda:send(day,digest))
-        assert transport.post.call_count==2 and transport.put.call_count==2
+        assert transport.post.call_count==2 and transport.put.call_count==3
+        assert transport.put.call_args.kwargs['headers']['Content-Range'].startswith('bytes */')
         assert status(root)['jobs'][0]['upload_state']=='needs_reconciliation'
 
         day='2026-11-21'
         digest=fixture(day)
         transport.post.return_value=SimpleNamespace(status_code=200,headers={'Location':'https://example.invalid/anything'})
         blocked(lambda:send(day,digest))
-        assert transport.put.call_count==2
+        assert transport.put.call_count==3
         assert status(root)['jobs'][0]['upload_state']=='retryable'
         transport.put.side_effect=None
         transport.post.return_value=SimpleNamespace(status_code=200,headers={'Location':location})
@@ -131,6 +132,30 @@ def main():
         else:
             raise AssertionError('Expected existing credentials to be preserved')
         assert saved==private_upload.read_worker_settings(config)
+
+        day='2026-11-24'
+        digest=fixture(day)
+        contents=(root/'renders'/day/'short.mp4').read_bytes()
+        transport.post.side_effect=None
+        complete=transport.put.return_value
+        transport.put.side_effect=[
+            requests.Timeout('response dropped'),
+            SimpleNamespace(status_code=308,headers={'Range':'bytes=0-7'}),
+            complete,
+        ]
+        calls=transport.post.call_count
+        assert send(day,digest)=='example1234'
+        assert transport.post.call_count==calls+1
+        assert transport.put.call_args.kwargs['headers']['Content-Range']==f'bytes 8-{len(contents)-1}/{len(contents)}'
+        assert transport.put.call_args.kwargs['data']==contents[8:]
+
+        day='2026-11-25'
+        digest=fixture(day)
+        transport.put.side_effect=[requests.Timeout('final response dropped'),complete]
+        calls=transport.put.call_count
+        assert send(day,digest)=='example1234'
+        assert transport.put.call_count==calls+2
+        assert transport.put.call_args.kwargs['data']==b''
 
     print('PASS channel pinning, OAuth refresh, daily opt-in, exact checksum, pause and safe upload retries')
 

@@ -60,6 +60,41 @@ def verify_channel(token, channel_id, http):
         raise ValueError('The OAuth connection must resolve to the configured ShadowChronicles channel only')
 
 
+def transfer(http, location, auth, contents, check_stop):
+    headers = {**auth, 'Content-Type': 'video/mp4'}
+    try:
+        uploaded = http.put(location, headers=headers, data=contents,
+                            timeout=(8,120), allow_redirects=False)
+        if uploaded.status_code in (200,201):
+            return uploaded
+        if uploaded.status_code != 308 and not 500 <= uploaded.status_code < 600:
+            raise RuntimeError('Video transfer was not confirmed')
+    except (OSError, requests.RequestException):
+        pass
+    total = len(contents)
+    state = http.put(location, headers={**auth,'Content-Length':'0','Content-Range':f'bytes */{total}'},
+                     data=b'', timeout=(8,30), allow_redirects=False)
+    if state.status_code in (200,201):
+        return state
+    if state.status_code != 308:
+        raise RuntimeError('Unable to verify the existing upload session')
+    received = state.headers.get('Range','')
+    match = re.fullmatch(r'bytes=0-([0-9]{1,9})',received)
+    if received and not match:
+        raise RuntimeError('Unexpected upload byte range')
+    start = int(match[1])+1 if match else 0
+    if start >= total:
+        raise RuntimeError('Unexpected upload byte range')
+    check_stop()
+    remaining = contents[start:]
+    uploaded = http.put(location, headers={**headers,'Content-Length':str(len(remaining)),
+                                          'Content-Range':f'bytes {start}-{total-1}/{total}'},
+                        data=remaining, timeout=(8,120), allow_redirects=False)
+    if uploaded.status_code not in (200,201):
+        raise RuntimeError('Resumed video transfer was not confirmed')
+    return uploaded
+
+
 def upload(root, day, approved_sha256, token, *, channel_id, confirmed=False, for_kids=None, http=requests):
     if not confirmed or not token or type(for_kids) is not bool:
         raise ValueError('Private upload requires explicit approval, an authorized OAuth token, and an audience decision')
@@ -104,6 +139,11 @@ def upload(root, day, approved_sha256, token, *, channel_id, confirmed=False, fo
 
     auth = {'Authorization': 'Bearer '+token}
     media_started = False
+    def check_stop():
+        with ledger(root) as db:
+            if db.execute('SELECT stopped FROM control').fetchone()[0]:
+                raise RuntimeError('Production stopped before media transfer')
+
     try:
         initialized = http.post(CREATE, params={'uploadType':'resumable','part':'snippet,status'},
             headers={**auth,'X-Upload-Content-Type':'video/mp4','X-Upload-Content-Length':str(len(contents))},
@@ -116,14 +156,9 @@ def upload(root, day, approved_sha256, token, *, channel_id, confirmed=False, fo
             or parsed.port not in (None,443) or parsed.username or parsed.password or parsed.fragment
             or parsed.path != '/upload/youtube/v3/videos' or not parsed.query):
             raise RuntimeError('Unexpected response when starting the private upload')
-        with ledger(root) as db:
-            if db.execute('SELECT stopped FROM control').fetchone()[0]:
-                raise RuntimeError('Production stopped before media transfer')
+        check_stop()
         media_started = True
-        uploaded = http.put(location,headers={**auth,'Content-Type':'video/mp4'},data=contents,
-                            timeout=(8,120),allow_redirects=False)
-        if uploaded.status_code not in (200,201):
-            raise RuntimeError('Video transfer was not confirmed')
+        uploaded = transfer(http,location,auth,contents,check_stop)
         response = uploaded.json()
         video_id = str(response.get('id',''))
         if (not re.fullmatch(r'[A-Za-z0-9_-]{11}',video_id)

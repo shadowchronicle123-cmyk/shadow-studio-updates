@@ -33,7 +33,7 @@ Production has never run unattended on a provisioned host or uploaded to YouTube
 ## Private upload checkpoint
 
 - The renderer records the SHA-256 of each newly verified MP4. The daily uploader checks the current local day, opt-in setting, emergency stop and integrity of the exact bytes. Legacy exports remain eligible for a manually approved checksum, but do not gain automated upload eligibility.
-- The uploader refreshes OAuth on the worker and verifies that `channels.list(mine=true)` resolves to the single configured ShadowChronicles channel. It requests private visibility and requires confirmation of video ID, channel and privacy. Credentials and upload sessions are kept out of the ledger and logs. A known failure before media transfer can retry. Once a transfer begins, uncertainty stops further attempts until the operator checks Studio. A hard kill can leave a `submitting` row, which is also quarantined.
+- The uploader refreshes OAuth on the worker and verifies that `channels.list(mine=true)` resolves to the single configured ShadowChronicles channel. It requests private visibility and requires confirmation of video ID, channel and privacy. Credentials and upload sessions are kept out of the ledger and logs. A known failure before media transfer can retry. After a dropped connection or server error during transfer, it queries the same upload session and can send the remaining bytes once. If that session cannot confirm completion, the ledger blocks every new insert for the export until the operator checks Studio. A hard kill can leave a `submitting` row, which is also quarantined. [YouTube resumable upload protocol](https://developers.google.com/youtube/data/guides/using_resumable_upload_protocol)
 - The service starts after a successful renderer exit only when the operator installs the upload service and its drop-in. A restart is allowed for transient errors, at most once per 10-minute interval. Upload automation never processes a prior day's backlog.
 
 ### First private upload
@@ -44,3 +44,9 @@ Production has never run unattended on a provisioned host or uploaded to YouTube
 4. Exercise the emergency stop before a scheduled transfer. Once a transfer begins it may complete on YouTube even if the worker is paused. A resume does not bypass the same-day ledger or resend confirmed or ambiguous uploads.
 
 No real credentials have been configured or used. The live milestone remains a hosted scheduled generation and a private upload verified in Studio.
+
+## Acceptance record
+
+- [Worker cloud run 44564075401](https://github.com/shadowchronicle123-cmyk/shadow-studio-updates/actions/runs/44564075401) passed all four Windows Server/Python jobs and Linux including eSpeak NG. It tested the first scheduled upload implementation at `7ce53a9`.
+- Local tests verified offline credential file mode and configuration preservation, pre-transfer retry, same-session continuation after a network timeout, recovery of a lost success response, and repeat-job suppression. The integration test ran the actual renderer and sent the exact MP4 bytes to a mock transport.
+- The Linux unit files passed `systemd-analyze verify` with the local test executable path. This environment has no active systemd user manager and no provisioned production host. No live timer or private YouTube upload was executed.
