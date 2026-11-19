@@ -51,3 +51,10 @@ No owner credentials, transfers to a live bucket, paid generation, or public pub
 - The offline engine prioritizes unused plot branches and supplies a second concrete ending for each. The wedding fixture checks eight distinct results without losing its supplied details.
 - Manual kit creation verifies the exact archived MP4 bytes against the approval hash. MP4, SRT, metadata and next steps are available without storage configuration.
 - Install rehearsal now also checks preservation of existing local draft files. The public feed remains on v0.41.0 while platform and browser acceptance runs.
+
+## Review checkpoint
+
+- Draft pull request: https://github.com/shadowchronicle123-cmyk/shadow-studio-updates/pull/1. Reviewed the source, test and package file list against v0.41.0. Resulting release candidates include no project data, drafts, uploads, secrets or temporary browser output.
+- Added quality diagnostics for audio/video end mismatch, finite loudness results, and a clear response when a damaged MP4 cannot be inspected. Local prelaunch and real export acceptance passed after this change.
+- On the next green run, inspect native Windows voice and browser stages specifically. Verify the exact reviewed commit, then merge only if its platform checks pass. The release workflow will publish a single v0.42.0 ZIP and SHA-256 to the feed. Verify Pages and the GitHub Release match before recommending installation.
+- A second CI failure exposed a non-deterministic corruption fixture: overwriting an arbitrary compressed packet range could still decode with the Ubuntu runner's newer FFmpeg. Replaced it with an invalid H.264 keyframe length while preserving the container and audio. Local acceptance now verifies that quality diagnostics and publishing both block the damaged file.

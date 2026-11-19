@@ -125,14 +125,18 @@ def video_record(jobid):
 @app.get('/api/library/{jobid}/quality')
 def quality_report(jobid: str):
     _, item = video_record(jobid)
-    return {'id':jobid, 'title':item.get('title',''), **quality_analyze(OUT/jobid/'short.mp4')}
+    try:
+        report = quality_analyze(OUT/jobid/'short.mp4')
+    except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise HTTPException(422,'The MP4 could not be inspected. Open it locally or render again before approval.') from exc
+    return {'id':jobid, 'title':item.get('title',''), **report}
 
 @app.patch('/api/library/{jobid}/review')
 def review_video(jobid:str, req:ReviewUpdate, background_tasks: BackgroundTasks):
     if req.status not in VALID_REVIEW:raise HTTPException(400,'Invalid review state')
     path, item=video_record(jobid)
     if req.status=='approved':
-        report=quality_analyze(OUT/jobid/'short.mp4')
+        report=quality_report(jobid)
         if not report['passed']:
             raise HTTPException(409,'Fix video preflight blockers before approval: '+ '; '.join(report['blockers']))
     item['review_status']=req.status
