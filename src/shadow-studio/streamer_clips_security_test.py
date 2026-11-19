@@ -1,5 +1,6 @@
 """Independent negative-case QA for streamer clip intake."""
 import json
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -44,7 +45,7 @@ with tempfile.TemporaryDirectory() as folder:
     else:
         raise AssertionError("Mixed valid/invalid manifest accepted")
     if database.exists():
-        with sqlite3.connect(database) as db:
+        with closing(sqlite3.connect(database)) as db:
             assert db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='clips'").fetchone() is None
     manifest.write_text(json.dumps([item]))
     assert queue(manifest, media, database)["queued"] == 1
