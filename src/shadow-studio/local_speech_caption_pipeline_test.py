@@ -45,4 +45,22 @@ with tempfile.TemporaryDirectory() as directory:
     else:
         raise AssertionError("Missing model directory accepted")
     assert not (root / "should-not-exist.mp4").exists()
-print("PASS local-only model initialization and speech-to-captioned-MP4 pipeline")
+    class MustNotInitialize:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Expensive ASR initialized before input preflight")
+    for invalid_target in (source, target, root / "invalid.mov"):
+        try:
+            transcribe_and_render(source, invalid_target, model_dir,
+                                  model_factory=MustNotInitialize)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Unsafe output accepted before model loading")
+    try:
+        transcribe_and_render(root / "missing.mp4", root / "unused.mp4",
+                              model_dir, model_factory=MustNotInitialize)
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("Missing input accepted before model loading")
+print("PASS local-only speech-to-MP4 pipeline and pre-model path safety")
