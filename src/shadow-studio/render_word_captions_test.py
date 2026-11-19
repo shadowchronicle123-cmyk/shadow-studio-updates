@@ -1,5 +1,7 @@
 """Real end-to-end local video caption render and no-overwrite QA."""
 from pathlib import Path
+from array import array
+from sys import byteorder
 import shutil
 import subprocess
 import tempfile
@@ -44,6 +46,25 @@ with tempfile.TemporaryDirectory() as folder:
     output_seconds = decoded_audio_seconds(output)
     assert abs(source_seconds - output_seconds) < 0.10, (
         f"Caption rendering changed audio duration: {source_seconds} -> {output_seconds}"
+    )
+    # Verify decoded samples retain meaningful energy, not just AAC metadata.
+    def audio_rms(video):
+        raw = subprocess.run(
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+             "-i", str(video), "-map", "0:a:0", "-ac", "1",
+             "-ar", "16000", "-f", "s16le", "-"],
+            capture_output=True, check=True, timeout=60).stdout
+        samples = array("h")
+        samples.frombytes(raw)
+        if byteorder != "little":
+            samples.byteswap()
+        assert len(samples) > 16000, "Decoded audio unexpectedly short"
+        return (sum(value * value for value in samples) / len(samples)) ** 0.5
+    source_rms = audio_rms(source)
+    rendered_rms = audio_rms(output)
+    assert source_rms > 10, "Source test audio was silent"
+    assert 0.7 < rendered_rms / source_rms < 1.3, (
+        f"Audio volume changed after rendering: {source_rms} -> {rendered_rms}"
     )
     assert output.stat().st_size > 0
     original = output.read_bytes()
