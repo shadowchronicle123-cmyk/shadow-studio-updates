@@ -15,7 +15,8 @@ with tempfile.TemporaryDirectory() as folder:
     output = root / "captioned.mp4"
     subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
                     "-f", "lavfi", "-i", "color=c=black:s=540x960:r=10:d=1.5",
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source)],
+                    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=1.5",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(source)],
                    check=True, timeout=60)
     words = [{"text": "HELLO", "start": 0.0, "end": 0.4},
              {"text": "WORLD", "start": 0.7, "end": 1.0}]
@@ -25,6 +26,11 @@ with tempfile.TemporaryDirectory() as folder:
                             "-of", "csv=p=0", str(output)],
                            capture_output=True, text=True, check=True, timeout=30)
     assert probe.stdout.strip() == "540,960", probe.stdout
+    audio_probe = subprocess.run([ffprobe, "-v", "error", "-select_streams", "a:0",
+                                  "-show_entries", "stream=codec_name",
+                                  "-of", "csv=p=0", str(output)],
+                                 capture_output=True, text=True, check=True, timeout=30)
+    assert audio_probe.stdout.strip() == "aac", "Caption renderer dropped streamer audio"
     assert output.stat().st_size > 0
     original = output.read_bytes()
     try:
@@ -35,4 +41,4 @@ with tempfile.TemporaryDirectory() as folder:
         raise AssertionError("Existing video overwritten")
     assert output.read_bytes() == original
     assert source.is_file()
-print("PASS offline local MP4 caption render, FFprobe validation and overwrite protection")
+print("PASS offline MP4 render, video geometry, preserved AAC audio and overwrite protection")
