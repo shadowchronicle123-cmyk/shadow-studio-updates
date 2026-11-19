@@ -1,6 +1,7 @@
 """Production ledger and real 1080p worker acceptance without external services."""
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import json
 import sys
 from pathlib import Path
 import subprocess
@@ -77,6 +78,29 @@ def main(real=False):
         assert 30 <= record['duration'] <= 60
         assert record['attempts']==2 or real
         assert (controls/record['artifact']).is_file()
+        folder = (controls/record['artifact']).parent
+        packaging = json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
+        assert packaging['content_type']=='ai_story' and packaging['title']==record['title']
+        assert '#Shorts' in packaging['description'] and 'shorts' in packaging['tags']
+        blank = root/'blank.mp4'
+        subprocess.run(['ffmpeg','-y','-loglevel','error','-f','lavfi','-i',
+                        'color=black:s=320x180:r=30:d=2','-c:v','libx264',str(blank)],check=True)
+        report = {'passed':True,'width':1080,'height':1920,'fps':30,'duration_seconds':60}
+        with patch.object(worker,'analyze',return_value=report):
+            try:
+                worker._check_export({'path':blank,'captions_path':folder/'captions.srt'})
+            except ValueError as exc:
+                assert 'near-black' in str(exc)
+            else:
+                raise AssertionError('Blank video passed the frame check')
+            invalid = root/'invalid.srt'
+            invalid.write_text('1\n00:00:02,000 --> 00:00:01,000\nInvalid cue\n',encoding='utf-8')
+            try:
+                worker._check_export({'path':blank,'captions_path':invalid})
+            except ValueError as exc:
+                assert 'captions' in str(exc)
+            else:
+                raise AssertionError('Backwards caption cue passed')
         with worker.ledger(controls) as db:
             assert db.execute('SELECT sha256 FROM verified_exports WHERE day=?', (record['day'],)).fetchone()[0] == (
                 hashlib.sha256((controls/record['artifact']).read_bytes()).hexdigest()
