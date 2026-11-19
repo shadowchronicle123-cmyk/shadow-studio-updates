@@ -1,0 +1,15 @@
+# Example only: requires an owner-controlled HTTPS hostname and persistent host.
+# Replace oauth.example.com; do not deploy unchanged.
+# Keep this host separate from the static Netlify site.
+oauth.example.com {
+    encode zstd gzip
+
+    @oauth path /oauth/start /oauth/callback /oauth/complete
+    handle @oauth {
+        # OAuth codes appear in callback query strings; never log request URLs.
+        reverse_proxy 127.0.0.1:8765
+    }
+    handle {
+        respond "Not found" 404
+    }
+}
