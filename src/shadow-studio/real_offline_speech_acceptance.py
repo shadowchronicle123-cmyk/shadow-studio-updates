@@ -13,6 +13,7 @@ The regular CI intentionally uses fake ASR; this opt-in check tests real speech.
 import os
 from array import array
 import math
+import re
 from sys import byteorder
 from pathlib import Path
 import shutil
@@ -66,7 +67,15 @@ def run():
     duration = probe_clip_duration(speech_clip)
     words = transcribe_with_faster_whisper(speech_clip, model, clip_duration=duration)
     recognized = " ".join(w["text"] for w in words).casefold()
-    if expected not in recognized:
+    def tokens(value):
+        return re.findall(r"\\w+", value.casefold(), flags=re.UNICODE)
+    expected_tokens = tokens(expected)
+    heard_tokens = tokens(recognized)
+    if not expected_tokens:
+        raise ValueError("Expected phrase must contain at least one word")
+    found = any(heard_tokens[i:i + len(expected_tokens)] == expected_tokens
+                for i in range(len(heard_tokens) - len(expected_tokens) + 1))
+    if not found:
         raise AssertionError(f"Expected spoken phrase {expected!r} not recognized: {recognized!r}")
     with tempfile.TemporaryDirectory(prefix="shadow-real-asr-") as directory:
         output = Path(directory) / "captioned.mp4"
