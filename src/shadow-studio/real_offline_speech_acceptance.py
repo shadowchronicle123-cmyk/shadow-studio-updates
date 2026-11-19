@@ -70,7 +70,15 @@ def run():
     with tempfile.TemporaryDirectory(prefix="shadow-real-asr-") as directory:
         output = Path(directory) / "captioned.mp4"
         # Test orchestration through the same real local model; no download.
-        transcribe_and_render(speech_clip, output, model_dir)
+        # Reuse the exact initialized offline model instead of loading weights twice.
+        def existing_model_factory(path, **options):
+            if Path(path) != model_dir or options != {
+                    "device": "cpu", "compute_type": "int8",
+                    "local_files_only": True}:
+                raise AssertionError("Unexpected model path or nonlocal model options")
+            return model
+        transcribe_and_render(speech_clip, output, model_dir,
+                              model_factory=existing_model_factory)
         if not output.is_file() or output.stat().st_size == 0:
             raise AssertionError("Captioned MP4 not created")
         before = probe_audio(speech_clip)
