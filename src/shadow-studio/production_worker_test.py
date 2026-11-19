@@ -124,9 +124,18 @@ def main(real=False):
         env = {'SHADOW_YOUTUBE_PRIVATE_AUTOMATION':'1','SHADOW_YOUTUBE_AUDIENCE':'not-made-for-kids',
                'SHADOW_YOUTUBE_CHANNEL_ID':channel,'SHADOW_YOUTUBE_CLIENT_ID':'test-client-id',
                'SHADOW_YOUTUBE_CLIENT_SECRET':'test-client-secret','SHADOW_YOUTUBE_REFRESH_TOKEN':'test-refresh'}
-        assert private_upload.upload_daily(controls,record['day'],env,transport)=='example1234'
+        try:
+            private_upload.upload_daily(controls,record['day'],env,transport)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Legacy daily upload bypassed narration approval')
+        assert transport.put.call_count == 0
+        assert private_upload.upload(controls,record['day'],hashlib.sha256((controls/record['artifact']).read_bytes()).hexdigest(),
+                                     'test-access',channel_id=channel,confirmed=True,for_kids=False,http=transport)=='example1234'
         assert transport.put.call_args.kwargs['data']==(controls/record['artifact']).read_bytes()
-        assert private_upload.upload_daily(controls,record['day'],env,transport)=='private'
+        assert private_upload.upload(controls,record['day'],hashlib.sha256((controls/record['artifact']).read_bytes()).hexdigest(),
+                                     'test-access',channel_id=channel,confirmed=True,for_kids=False,http=transport)=='private'
         assert transport.put.call_count==1
         with patch.dict('os.environ',{'SHADOW_PRODUCTION_STATE':str(controls)}):
             downloaded = TestClient(app.app).get('/api/production/render/2026-11-19')
