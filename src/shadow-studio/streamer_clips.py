@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+from urllib.parse import urlsplit
 
 ALLOWED = {".mp4", ".mov", ".mkv", ".webm"}
 MAX_BYTES = 2 * 1024**3
@@ -16,7 +17,10 @@ def validate(item, media_root):
         raise ValueError("Missing clip metadata or documented permission")
     if item["license_scope"] not in ("repost", "edit-and-repost", "commercial-edit-and-repost"):
         raise ValueError("Permission scope does not authorize reposting")
-    if not str(item["source_url"]).startswith(("https://www.youtube.com/", "https://youtu.be/", "https://www.twitch.tv/", "https://clips.twitch.tv/")):
+    source = urlsplit(str(item["source_url"]))
+    if (source.scheme != "https" or source.hostname not in
+            {"www.youtube.com", "youtube.com", "youtu.be", "www.twitch.tv", "clips.twitch.tv"}
+            or source.username or source.password or source.port not in (None, 443)):
         raise ValueError("Unrecognized source URL")
     start, end = item["start_seconds"], item["end_seconds"]
     if type(start) not in (int, float) or type(end) not in (int, float) or not 0 <= start < end <= start + 180:
