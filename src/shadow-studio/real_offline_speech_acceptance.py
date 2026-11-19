@@ -68,7 +68,7 @@ def run():
     words = transcribe_with_faster_whisper(speech_clip, model, clip_duration=duration)
     recognized = " ".join(w["text"] for w in words).casefold()
     def tokens(value):
-        return re.findall(r"\\w+", value.casefold(), flags=re.UNICODE)
+        return re.findall(r"\w+", value.casefold(), flags=re.UNICODE)
     expected_tokens = tokens(expected)
     heard_tokens = tokens(recognized)
     if not expected_tokens:
