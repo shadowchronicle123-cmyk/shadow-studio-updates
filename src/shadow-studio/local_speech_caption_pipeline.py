@@ -11,6 +11,15 @@ from render_word_captions import render_local_clip
 
 
 def transcribe_and_render(source, output, model_path, facecam=None, model_factory=None):
+    # Reject invalid paths before loading a potentially expensive local model.
+    source_path = Path(source).resolve(strict=True)
+    target_path = Path(output).resolve()
+    if (not source_path.is_file() or source_path.suffix.lower() not in
+            {".mp4", ".mov", ".mkv", ".webm"}):
+        raise ValueError("Input must be an existing local video")
+    if (target_path.suffix.lower() != ".mp4" or source_path == target_path
+            or target_path.exists()):
+        raise ValueError("Output must be a new MP4 distinct from input")
     model_dir = Path(model_path).resolve(strict=True)
     if not model_dir.is_dir():
         raise ValueError("Model path must be an existing local directory")
