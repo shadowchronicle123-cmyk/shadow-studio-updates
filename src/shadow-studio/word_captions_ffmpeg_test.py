@@ -32,9 +32,11 @@ with tempfile.TemporaryDirectory() as folder:
     captioned = frame_hashes(True)
     def digest(line):
         return line.split(",")[-1].strip()
-    assert digest(captioned[1]) != digest(baseline[1]), "First word not visible"
-    assert digest(captioned[8]) != digest(baseline[8]), "Second word not visible"
+    for frame in (0, 1, 2):
+        assert digest(captioned[frame]) != digest(baseline[frame]), f"First word absent at frame {frame}"
+    for frame in (7, 8, 9):
+        assert digest(captioned[frame]) != digest(baseline[frame]), f"Second word absent at frame {frame}"
     assert digest(captioned[1]) != digest(captioned[8]), "Word transition did not change caption pixels"
-    for frame in (4, 5, 11, 14):
+    for frame in (3, 4, 5, 6, 10, 11, 12, 13, 14):
         assert digest(captioned[frame]) == digest(baseline[frame]), f"Caption visible outside speech at frame {frame}"
 print("PASS FFmpeg renders distinct words and clears captions in silence and after speech")
