@@ -28,6 +28,8 @@ invalid = [
     [{"words": [{"word": " ", "start": 0.1, "end": 0.5}]}],
     [{"text": "segment-level only", "start": 0.1, "end": 0.5}],
     [],
+    [{"words": "not a word list"}],
+    [{"words": {"word": "bad"}}],
 ]
 for item in invalid:
     try:
@@ -42,4 +44,11 @@ except ValueError:
     pass
 else:
     raise AssertionError("Transcript beyond clip duration accepted")
-print("PASS local-ASR word adapter, fake model, missing times and overlap rejection")
+for invalid_duration in (float("nan"), float("inf"), -1, 0, True):
+    try:
+        transcript_words(segments, clip_duration=invalid_duration)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"Invalid clip duration accepted: {invalid_duration}")
+print("PASS local ASR validation, finite duration, fake model and word collection safety")
