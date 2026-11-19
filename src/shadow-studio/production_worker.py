@@ -193,8 +193,10 @@ def run_day(root, ideas, media, timezone='UTC', *, day=None, narrator=local_narr
                     if db.execute('SELECT 1 FROM jobs WHERE fingerprint=? AND day<>?',(fingerprint,day)).fetchone():
                         raise ValueError('Generated script is a duplicate')
                 with tempfile.TemporaryDirectory(prefix='working-',dir=output) as folder:
+                    neural = narrator.__name__ == 'neural_narration'
+                    render_voices = ('en-us', 'en-gb') if neural else voices
                     result = generate(script,folder,background=clip,resolution='1080p',
-                                      voice=voices[0],second_voice=voices[1],voice_factory=narrator,
+                                      voice=render_voices[0],second_voice=render_voices[1],voice_factory=narrator,
                                       progress=progress,target_seconds=45)
                     progress(96,'Checking export')
                     report = _check_export(result)
