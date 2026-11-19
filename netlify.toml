@@ -16,5 +16,5 @@
 [[redirects]]
   from = "/oauth/*"
   to = "/oauth-unavailable.html"
-  status = 200
+  status = 302
   force = true
