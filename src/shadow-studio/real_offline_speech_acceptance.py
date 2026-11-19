@@ -11,6 +11,8 @@ and creates no YouTube upload. Do not run against unlicensed streamer footage.
 The regular CI intentionally uses fake ASR; this opt-in check tests real speech.
 """
 import os
+from array import array
+from sys import byteorder
 from pathlib import Path
 import shutil
 import subprocess
@@ -35,6 +37,18 @@ def probe_audio(path):
         check=True, capture_output=True, text=True, timeout=30)
     if "audio" not in result.stdout:
         raise AssertionError("Rendered MP4 has no audio stream")
+    decoded = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+         "-i", str(path), "-map", "0:a:0", "-ac", "1", "-ar", "16000",
+         "-f", "s16le", "-"],
+        check=True, capture_output=True, timeout=90).stdout
+    samples = array("h")
+    samples.frombytes(decoded)
+    if byteorder != "little":
+        samples.byteswap()
+    if len(samples) < 16000:
+        raise AssertionError("Audio is missing or shorter than one second")
+    return sum(sample * sample for sample in samples) / len(samples)
 
 
 def run():
@@ -59,8 +73,11 @@ def run():
         transcribe_and_render(speech_clip, output, model_dir)
         if not output.is_file() or output.stat().st_size == 0:
             raise AssertionError("Captioned MP4 not created")
-        probe_audio(output)
-    print("PASS real local speech recognition, timed captions, MP4 and audio stream")
+        before = probe_audio(speech_clip)
+        after = probe_audio(output)
+        if before <= 100 or not 0.5 < after / before < 1.5:
+            raise AssertionError("Caption rendering muted or significantly changed audio")
+    print("PASS real local speech recognition, timed captions, MP4 and audible preserved audio")
 
 
 if __name__ == "__main__":
