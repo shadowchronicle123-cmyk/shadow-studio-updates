@@ -45,6 +45,32 @@ with tempfile.TemporaryDirectory() as directory:
     else:
         raise AssertionError("Missing model directory accepted")
     assert not (root / "should-not-exist.mp4").exists()
+    class NoSpeechModel(LocalOnlyModel):
+        def transcribe(self, source, **kwargs):
+            return iter([{"words": []}]), None
+    silent_output = root / "silent-should-not-render.mp4"
+    try:
+        transcribe_and_render(source, silent_output, model_dir,
+                              model_factory=NoSpeechModel)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Empty ASR transcript rendered a video")
+    assert not silent_output.exists(), "No-speech input left a rendered artifact"
+    class OverlappingSpeechModel(LocalOnlyModel):
+        def transcribe(self, source, **kwargs):
+            return iter([{"words": [
+                {"word": "first", "start": 0.1, "end": 0.7},
+                {"word": "second", "start": 0.5, "end": 0.9}]}]), None
+    overlap_output = root / "overlap-should-not-render.mp4"
+    try:
+        transcribe_and_render(source, overlap_output, model_dir,
+                              model_factory=OverlappingSpeechModel)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Overlapping ASR timestamps rendered a video")
+    assert not overlap_output.exists(), "Bad ASR timestamps left a rendered artifact"
     class MustNotInitialize:
         def __init__(self, *args, **kwargs):
             raise AssertionError("Expensive ASR initialized before input preflight")
@@ -63,4 +89,4 @@ with tempfile.TemporaryDirectory() as directory:
         pass
     else:
         raise AssertionError("Missing input accepted before model loading")
-print("PASS local-only speech-to-MP4 pipeline and pre-model path safety")
+print("PASS local speech-to-MP4, no-speech, overlap and path safety")
