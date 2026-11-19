@@ -203,6 +203,19 @@ def run_day(root, ideas, media, timezone='UTC', *, day=None, narrator=local_narr
                     staged.mkdir()
                     for key,name in (('path','short.mp4'),('captions_path','captions.srt')):
                         Path(result[key]).replace(staged/name)
+                    narration_source = Path(result['narration_path'])
+                    if not narration_source.is_file():
+                        raise ValueError('Clean narration stem missing from render')
+                    narration_source.replace(staged/'narration.wav')
+                    engine = os.getenv('SHADOW_NARRATION_ENGINE', 'espeak').strip().lower()
+                    voice_id = (os.getenv('SHADOW_NEURAL_PRIMARY_VOICE', 'en-US-GuyNeural')
+                                if engine == 'edge-neural' else voices[0])
+                    # Generated content never self-approves its own voice.
+                    (staged/'narration-review.json').write_text(json.dumps({
+                        'engine': engine, 'voice_id': voice_id,
+                        'listening_review_approved': False,
+                        'narration_wav': f'renders/{day}/narration.wav'
+                    },indent=2),encoding='utf-8')
                     (staged/'story.json').write_text(json.dumps(script,ensure_ascii=False,indent=2),encoding='utf-8')
                     (staged/'metadata.json').write_text(
                         json.dumps({'content_type':'ai_story',**metadata(script)},ensure_ascii=False,indent=2),
