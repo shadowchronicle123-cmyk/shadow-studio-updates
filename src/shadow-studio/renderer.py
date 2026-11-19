@@ -199,7 +199,11 @@ def save_scene_subtitles(story, durations, destination, narration=None):
     Path(destination).write_text('\n'.join(blocks), encoding='utf-8')
 
 
-def generate(story,output_dir,style='messages',background=None,progress=None,voice='en-US-AriaNeural',second_voice=None,voice_rate=0,resolution='720p',gameplay_start=0):
+SCENE_PACING = {"snappy": (0.2, 1.2), "normal": (0.5, 2.25), "deliberate": (0.85, 2.6)}
+
+
+def generate(story,output_dir,style='messages',background=None,progress=None,voice='en-US-AriaNeural',second_voice=None,voice_rate=0,resolution='720p',gameplay_start=0,*,pacing='normal',captions=True):
+    gap, minimum_hold = SCENE_PACING[pacing]
     if not isinstance(story, dict) or not isinstance(story.get('lines'), list) or not 1 <= len(story['lines']) <= 24:
         raise ValueError('Story requires 1 to 24 narration scenes')
     for line in story['lines']:
@@ -229,7 +233,7 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
             with wave.open(str(normalized), 'rb') as pcm:
                 spoken = pcm.getnframes() / pcm.getframerate()
             offset = round(line_pause(line) * 30) / 30
-            hold = math.ceil(max(spoken + 0.5, 2.25) * 30) / 30
+            hold = math.ceil(max(spoken + gap, minimum_hold) * 30) / 30
             durations.append(offset + hold)
             narration.append((offset, spoken))
             wavs.append(normalized)
@@ -243,7 +247,11 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
                     Image.new('RGB', (W, H), '#101421').save(previous)
                 concat.append((previous, offset))
             concat.append((img, hold))
-        save_scene_subtitles(story, durations, output_dir/'captions.srt', narration)
+        captions_path = output_dir / 'captions.srt'
+        if captions:
+            save_scene_subtitles(story, durations, captions_path, narration)
+        else:
+            captions_path.unlink(missing_ok=True)
         listfile=tmp/'scenes.txt'
         def escaped(p):return p.as_posix().replace("'", "'\\''")
         lines=[]
@@ -287,4 +295,4 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
         if progress:progress(85,'Finalizing voiceover and MP4')
         run(args)
         if progress:progress(100,'Video ready for review')
-        return {'path':str(output),'duration':round(sum(durations),1),'resolution':resolution,'fps':30,'captions_path':str(output_dir/'captions.srt')}
+        return {'path':str(output),'duration':round(sum(durations),1),'resolution':resolution,'fps':30,'captions_path':str(captions_path) if captions else None}

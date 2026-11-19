@@ -18,9 +18,15 @@ def save_project(data):
         s=str(l.get('speaker','Narrator')).strip()[:24]
         t=str(l.get('text','')).strip()[:240]
         if not t:raise ValueError('Empty line')
-        cleaned.append({'speaker':s or 'Narrator','text':t,'pause_before':line_pause(l)})
+        line = {'speaker':s or 'Narrator','text':t,'pause_before':line_pause(l)}
+        if isinstance(l.get('alternate'), str) and l['alternate'].strip():
+            line['alternate'] = l['alternate'].strip()[:240]
+        cleaned.append(line)
     id=uuid.uuid4().hex[:12]
     payload={'id':id,'title':title,'lines':cleaned,'style':data.get('style','messages'),'voice':data.get('voice','en-US-AriaNeural'),'voice_rate':int(data.get('voice_rate',0)),'resolution':data.get('resolution','720p')}
+    for field in ('second_voice', 'gameplay_id', 'pacing', 'captions', 'target', 'genre', 'ending'):
+        if field in data:
+            payload[field] = data[field]
     (PROJECTS/f'{id}.json').write_text(json.dumps(payload,ensure_ascii=False,indent=2),encoding='utf-8')
     return payload
 

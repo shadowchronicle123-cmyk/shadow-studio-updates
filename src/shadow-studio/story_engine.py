@@ -30,7 +30,7 @@ def make_story(idea, style="messages", target=45):
       ('Friend','What would you do if you were me?')]
     return {'title':idea[:85].rstrip('.!?')+'... 😳 #Shorts','lines':[{'speaker':a,'text':b} for a,b in lines],'source':'template'}
 
-def random_story(genre="random", target=45):
+def random_story(genre="random", target=45, ending="resolved"):
     """Choose and vary a complete outline with a duration-appropriate number of beats."""
     if genre == "random":
         genre = random.choice(tuple(STORIES))
@@ -49,6 +49,10 @@ def random_story(genre="random", target=45):
         text, alternate = random.sample(variants, 2)
         lines.append({"speaker": speaker, "text": text, "alternate": alternate,
                       "pause_before": (0.8 if index == 5 else 0)})
+    if ending == "question":
+        lines.append({"speaker": "Me", "text": "What would you have done in my place?",
+                      "alternate": "Be honest. Would you have handled it differently?",
+                      "pause_before": 0})
     return {"title": title + " #Shorts", "lines": lines, "source": "original",
             "genre": genre}
 
