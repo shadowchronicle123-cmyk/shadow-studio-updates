@@ -54,9 +54,7 @@ def transcribe_and_render(source, output, model_path, facecam=None, model_factor
         model_factory = WhisperModel
     model = model_factory(str(model_dir), device="cpu", compute_type="int8",
                           local_files_only=True)
-    words = transcribe_with_faster_whisper(source_path, model)
-    if words[-1]["end"] > duration + 0.05:
-        raise ValueError("Transcribed words extend beyond source video duration")
+    words = transcribe_with_faster_whisper(source_path, model, clip_duration=duration)
     return render_local_clip(source_path, words, target_path, facecam=facecam)
 
 
