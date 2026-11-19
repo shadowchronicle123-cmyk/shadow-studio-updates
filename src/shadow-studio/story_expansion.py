@@ -96,7 +96,65 @@ GENERAL = {
         "I heard two knocks and let you in. At sunrise I threw the printouts away. You kept your phone off, too.",
     ),
 }
+HOUSEHOLD = {
+    "meter-reading": (
+        "The bill made sense until I compared it with the photo we took when we moved in.",
+        "Can you pull up the photo of the meter? The first digit on the statement looks wrong.",
+        "I've got it. The photo also shows the number on the meter next door.",
+        "The statement listed the next-door meter. We'd been chasing the wrong explanation all week.",
+        "Send both pictures to the office. I'll ask our neighbor whether their bill looks strange too.",
+        "The office corrected both accounts. We saved the photos with our next month's paperwork.",
+    ),
+    "written-split": (
+        "We were halfway through a fight when I found the note we'd agreed to on move-in day.",
+        "Before either of us sends more money, can we read what we wrote down?",
+        "You keep the note. I'll pull up the transactions and read out the dates.",
+        "One transfer was for our deposit. We'd counted it as rent because the memo just said apartment.",
+        "Let's put the amounts in a shared note while we're both looking at them.",
+        "We settled the difference that night and added a label to every transfer after that.",
+    ),
+    "office-copy": (
+        "The rental office had two different copies of our balance. Only one had a date.",
+        "I can stop by after work. Do you want to meet me there?",
+        "Yes. Bring the screenshots and ask who changed the balance last.",
+        "It was an old credit from the last tenant. The office had applied it to our account and then removed it.",
+        "Can we ask for a corrected statement before paying the difference?",
+        "They sent one while we were there. We split the amount we could both verify.",
+    ),
+}
+WORKPLACE = {
+    "version-history": (
+        "I opened the document while everyone was still on the call. The version history changed the conversation.",
+        "Can you share your screen? I want to read the entry before we bring it up.",
+        "Start with today's version and work backward. We only need to see when it changed.",
+        "The edit had been made before my shift. The original note was still attached to the older version.",
+        "Send that version to the supervisor. Ask them to correct the record with everyone who saw the first one.",
+        "The correction went out before we left. I saved a copy and moved on with my shift.",
+    ),
+    "handover": (
+        "The note everyone blamed me for was folded under the handover sheet.",
+        "Did you sign that sheet or the one they showed us in the meeting?",
+        "Get both pages before you answer. There's a copy in the binder near the clock.",
+        "The note was for the next shift, and the date at the top had been carried over from yesterday.",
+        "Bring it to the handover. I'll be there to explain where we found it.",
+        "We cleared it up at the next handover. They put the date beside the signature after that.",
+    ),
+    "one-on-one": (
+        "I thought my supervisor was brushing me off until they showed me what had been forwarded.",
+        "Can I show you the message I actually sent? I think there's a line missing.",
+        "Look at mine first. This is what I was asked to respond to.",
+        "The forwarded message had my first sentence and none of the explanation underneath it.",
+        "Let's put the full message in the same thread. I'll tell them why my response changed.",
+        "We did it together, right there. The next reply was an apology and a time to talk.",
+    ),
+}
 AFTERMATH = {
+    "meter-reading": "We split the corrected bill at the kitchen table. Our neighbor sent us a photo of their meter for next time.",
+    "written-split": "My roommate texted me the cleaned-up list the next morning. The first entry said deposit in capital letters.",
+    "office-copy": "We waited for the corrected statement, then took care of the balance together. Nobody had to guess at a number.",
+    "version-history": "My supervisor put the correction in the original thread. When I checked after work, my name was off the error.",
+    "handover": "The next shift read both pages and signed off. I asked for a copy, then finished my shift.",
+    "one-on-one": "My supervisor called the person who forwarded it. That afternoon, I got the first reply that actually addressed what I'd asked.",
     "guest-list": "We moved his invitation to a family lunch after the honeymoon. Dad changed the seating chart himself.",
     "speech": "Her ex sent the recording to both of us. We listened to it together before we picked a place for it in the ceremony.",
     "deadline": "She called him, then called the planner. We each read the final guest list before we paid.",
@@ -132,6 +190,10 @@ def expand(idea, genre, target, ending, avoid=(), rng=None):
         pool = WEDDING
         names = tuple(WEDDING) if genre != "comedy" else ("name-cards", "guest-list", "deadline")
         partner = "Partner" if re.search(r"\b(?:girlfriend|boyfriend|fianc[eé]e?|partner|wife|husband)\b", idea, re.I) else "Friend"
+    elif genre in ("drama","betrayal","mystery","revenge") and re.search(r"\b(?:roommate|rent|landlord)\b", idea, re.I) and re.search(r"\b(?:bill|rent|deposit|paid|charge)\b", idea, re.I):
+        pool, names, partner = HOUSEHOLD, tuple(HOUSEHOLD), "Roommate" if re.search(r"\broommate\b",idea,re.I) else "Friend"
+    elif genre in ("drama","betrayal","mystery","revenge") and re.search(r"\b(?:coworker|supervisor|manager|shift|boss)\b", idea, re.I):
+        pool, names, partner = WORKPLACE, tuple(WORKPLACE), "Coworker"
     else:
         pool = GENERAL
         names = GENRE_ARCS[genre]

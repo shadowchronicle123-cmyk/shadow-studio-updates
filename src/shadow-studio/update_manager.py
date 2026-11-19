@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 ROOT = Path(__file__).resolve().parent
-VERSION = '0.42.0'
+VERSION = '0.43.0'
 PRESERVE = {'.env', '.venv', 'outputs', 'projects', 'uploads', 'gameplay', 'clips', 'media', 'backups', 'update_backups', 'config.json', 'publishing_drafts'}
 MANIFEST_LIMIT = 32768
 ZIP_LIMIT = 80 * 1024 * 1024
@@ -133,8 +133,11 @@ def apply(feed=None):
                 compile(path.read_bytes(), str(path.relative_to(staging)), 'exec')
             except SyntaxError as exc:
                 raise UpdateError(f'Release contains an incompatible Python file: {path.name}') from exc
-        touched=[]; backup=ROOT/'update_backups'/datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
-        backup.mkdir(parents=True,exist_ok=False)
+        touched = []
+        backup_root = ROOT / 'update_backups'
+        backup_root.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+        backup = Path(tempfile.mkdtemp(prefix=timestamp+'-', dir=backup_root))
         try:
             for source in staging.rglob('*'):
                 if not source.is_file():continue

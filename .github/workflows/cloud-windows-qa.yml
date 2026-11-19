@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/cloud-windows-qa.yml'
       - 'src/shadow-studio/**'
+      - '.github/scripts/setup-test-ffmpeg.sh'
 permissions:
   contents: read
 concurrency:
@@ -40,6 +41,7 @@ jobs:
             choco install ffmpeg -y --no-progress
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $env:PATH += ';C:\ProgramData\chocolatey\bin'
+            'C:\ProgramData\chocolatey\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           }
           ffmpeg -version
           ffprobe -version
@@ -87,3 +89,51 @@ jobs:
           path: src/shadow-studio/browser-evidence/
           if-no-files-found: warn
           retention-days: 7
+
+
+  linux-qa:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Set up media tools
+        run: bash .github/scripts/setup-test-ffmpeg.sh
+      - name: Run Linux regression tests
+        working-directory: src/shadow-studio
+        run: |
+          python -m pip install --timeout 30 --retries 2 -r requirements.txt
+          python self_test.py
+          python story_expansion_test.py
+          python conversation_test.py
+          python production_smoke_test.py
+          python audio_mix_test.py
+          python batch_render_test.py
+          python integration_test.py
+          python integration_acceptance_v027.py
+          python cloud_handoff_test.py
+          python update_manager_test.py
+          python migration_acceptance_test.py
+
+  candidate:
+    needs: [windows-qa, linux-qa]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build and rehearse the candidate ZIP
+        working-directory: src/shadow-studio
+        run: |
+          python -m pip install --timeout 30 --retries 2 -r requirements.txt
+          python prepare_candidate.py candidate
+          (cd candidate && sha256sum -c ./*.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shadow-studio-release-candidate
+          path: src/shadow-studio/candidate/
+          if-no-files-found: error
+          retention-days: 30

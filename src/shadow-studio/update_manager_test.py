@@ -1,4 +1,5 @@
 """Run update installation and rollback in a temporary installation."""
+from datetime import datetime, timezone
 import hashlib
 import io
 import json
@@ -40,7 +41,9 @@ def reject(data, expected, checksum=None):
 
 
 def main():
-    with tempfile.TemporaryDirectory() as folder, patch.object(updater, 'ROOT', Path(folder)):
+    with (tempfile.TemporaryDirectory() as folder, patch.object(updater,'ROOT',Path(folder)),
+          patch.object(updater,'datetime') as clock):
+        clock.now.return_value = datetime(2026,11,19,tzinfo=timezone.utc)
         root = Path(folder)
         for name in ('app.py', 'renderer.py'):
             (root / name).write_text('original\n')
@@ -78,6 +81,7 @@ def main():
         assert not list(root.glob('.shadow-update-*'))
         assert 'Installed 9.0.0' in update(bundle(**{'PROJECTS/story.json': 'exclude', '.env': 'exclude'}))
         assert (root / 'app.py').read_text() == 'app_version = "new"\n'
+        assert len(list((root/'update_backups').iterdir())) == 2
         assert any(path.read_text() == 'original\n' for path in (root / 'update_backups').glob('*/app.py'))
         for name, text in original.items():
             assert (root / name).read_text() == text

@@ -1,6 +1,7 @@
 """Offline story-to-video engine. Requires installed FFmpeg; voice is local OS TTS."""
 import io, os, math, wave, shutil, subprocess, tempfile
 from pathlib import Path
+from gameplay_library import gameplay_window
 from PIL import Image, ImageDraw, ImageFont
 from voice_engine import create_voice
 from audio_mix import line_sound, mix_audio
@@ -246,7 +247,7 @@ def dialogue_holds(narration, gap, minimum_hold, target_seconds=None):
 
 
 def generate(story,output_dir,style='messages',background=None,progress=None,voice='en-US-AriaNeural',second_voice=None,voice_rate=0,resolution='720p',gameplay_start=0,*,pacing='normal',captions=True,
-             music=None,voice_volume=100,music_volume=22,target_seconds=None,gameplay_percent=58,gameplay_anchor="center",primary_speaker=None):
+             music=None,voice_volume=100,music_volume=22,target_seconds=None,gameplay_percent=58,gameplay_anchor="center",primary_speaker=None,gameplay_trim_start=None,gameplay_trim_end=None):
     gap, minimum_hold = SCENE_PACING[pacing]
     if not isinstance(story, dict) or not isinstance(story.get('lines'), list) or not 1 <= len(story['lines']) <= 24:
         raise ValueError('Story requires 1 to 24 narration scenes')
@@ -258,6 +259,9 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
     if resolution not in ('720p','1080p'):raise ValueError('Choose 720p or 1080p')
     out_width,out_height=(720,1280) if resolution=='720p' else (1080,1920)
     has_gameplay=bool(background)
+    if has_gameplay and not Path(background).is_file():
+        raise ValueError('Gameplay file is missing. Select another clip and try again.')
+    trim = gameplay_window(background, gameplay_trim_start, gameplay_trim_end)
     layout={'size':(out_width,out_height),'gameplay_percent':gameplay_percent if has_gameplay else 0}
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):raise RuntimeError('FFmpeg and ffprobe are required on PATH')
     output_dir=Path(output_dir);output_dir.mkdir(parents=True,exist_ok=True)
@@ -267,6 +271,17 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
         if not valid_voice(second_voice): raise ValueError('Second character voice is unavailable')
     with tempfile.TemporaryDirectory(prefix='shadow_') as temp:
         tmp=Path(temp);concat=[]; wavs=[]; durations=[]; narration=[]; images=[]
+        if trim:
+            if progress:progress(5,'Preparing trimmed gameplay')
+            start,end = trim
+            panel_width,panel_height = out_width,gameplay_dimensions(out_height,gameplay_percent)[1]
+            loop = tmp/'gameplay-loop.mp4'
+            run(['ffmpeg','-y','-loglevel','error','-ss',str(start),'-i',background,
+                 '-t',str(end-start),'-map','0:V:0','-an','-filter_threads','1','-vf',
+                 gameplay_crop(panel_width,panel_height,gameplay_anchor)+',fps=30,format=yuv420p',
+                 '-c:v','libx264','-preset','ultrafast','-crf','18',loop])
+            background = loop
+            gameplay_start = 0
         for i,line in enumerate(story['lines']):
             if progress:progress(10+int(i/max(len(story['lines']),1)*45),f'Creating scene {i+1}/{len(story["lines"])}')
             wav=tmp/f'voice_{i:03}.wav'

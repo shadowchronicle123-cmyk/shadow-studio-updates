@@ -27,7 +27,7 @@ def save_project(data):
         cleaned.append(line)
     id=uuid.uuid4().hex[:12]
     payload={'id':id,'title':title,'lines':cleaned,'style':data.get('style','messages'),'voice':data.get('voice','en-US-AriaNeural'),'voice_rate':int(data.get('voice_rate',0)),'resolution':data.get('resolution','720p')}
-    for field in ('second_voice', 'gameplay_id', 'gameplay_percent', 'gameplay_anchor', 'primary_speaker', 'idea', 'provider', 'pacing', 'captions', 'target', 'fit_duration', 'genre', 'ending', 'music_name', 'voice_volume', 'music_volume'):
+    for field in ('second_voice', 'gameplay_id', 'gameplay_percent', 'gameplay_anchor', 'gameplay_trim_start', 'gameplay_trim_end', 'primary_speaker', 'idea', 'provider', 'pacing', 'captions', 'target', 'fit_duration', 'genre', 'ending', 'music_name', 'voice_volume', 'music_volume'):
         if field in data:
             payload[field] = data[field]
     path = PROJECTS/f'{id}.json'
