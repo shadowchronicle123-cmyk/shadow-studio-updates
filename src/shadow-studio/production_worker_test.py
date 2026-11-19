@@ -79,6 +79,12 @@ def main(real=False):
         assert record['attempts']==2 or real
         assert (controls/record['artifact']).is_file()
         folder = (controls/record['artifact']).parent
+        stem = folder/'narration.wav'
+        review = json.loads((folder/'narration-review.json').read_text(encoding='utf-8'))
+        assert stem.is_file()
+        assert review['listening_review_approved'] is False
+        assert review['narration_sha256'] == hashlib.sha256(stem.read_bytes()).hexdigest()
+        assert review['narration_wav'] == f"renders/{record['day']}/narration.wav"
         packaging = json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
         assert packaging['content_type']=='ai_story' and packaging['title']==record['title']
         assert '#Shorts' in packaging['description'] and 'shorts' in packaging['tags']
