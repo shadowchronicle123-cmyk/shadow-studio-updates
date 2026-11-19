@@ -1,0 +1,25 @@
+name: FFmpeg word-caption render smoke QA
+on:
+  push:
+    branches: [qa/word-captions-ffmpeg-smoke]
+  pull_request:
+    paths:
+      - 'src/shadow-studio/word_captions_ffmpeg_test.py'
+      - '.github/workflows/word-captions-ffmpeg-qa.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install existing free FFmpeg test dependencies
+        run: bash .github/scripts/setup-test-ffmpeg.sh
+      - name: Verify actual rendered caption pixels
+        working-directory: src/shadow-studio
+        run: python word_captions_ffmpeg_test.py
