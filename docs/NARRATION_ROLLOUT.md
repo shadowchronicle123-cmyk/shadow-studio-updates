@@ -15,11 +15,11 @@ ShadowChronicles uses a stable narrator identity. Creator comparisons should use
 1. Create voice samples using actual neural synthesis and compare pacing, pronunciation and emotional delivery against reference observations.
 2. Listen to and explicitly approve a consistent narrator voice; store the allowlist only in worker configuration.
 3. Validate the new narration stem and SHA-256 in cloud rendering tests; strengthen binding to the verified MP4/export ledger and protect the manifest from untrusted modifications.
-4. Make all unattended upload routes pass the gate; prevent legacy upload CLI from bypassing it.
+4. Make all unattended upload routes pass the gate; prevent legacy upload CLI from bypassing it. Ensure reviewed MP4 and narration digests are stored in a durable, authenticated approval record.
 5. Run a real private-only upload with owner consent, verify the exact channel and private visibility, and only then consider scheduling.
 
 Cloud tests are offline and cannot establish naturalness or successful Google authorization.
 
 ## Per-video approval
 
-For each video, listen to the exported clean `narration.wav`, review the finished MP4, then set `SHADOW_APPROVED_NARRATION_SHA256` to that WAV's SHA-256 in the private worker environment. A voice allowlist alone is not enough. Do not place owner approval settings in the generated `narration-review.json`. The owner must repeat this approval for each new audio track; this is **not** yet a fully hands-off daily workflow. The exact-video MP4 fingerprint is still checked by the existing private upload worker, but a separate durable approval ledger tying both fingerprints to the same reviewed job remains future work.
+For each video, listen to the exported clean `narration.wav`, review the finished MP4, then set `SHADOW_APPROVED_NARRATION_SHA256` to that WAV's SHA-256 in the private worker environment. A voice allowlist alone is not enough. Do not place owner approval settings in the generated `narration-review.json`. The owner must repeat this approval for each new audio track; this is **not** yet a fully hands-off daily workflow. The gated unattended entrypoint now requires `SHADOW_APPROVED_VIDEO_SHA256` to match the verified MP4 ledger fingerprint as well as `SHADOW_APPROVED_NARRATION_SHA256` to match the narration WAV. A durable approval ledger, review UI, and enforcement across every legacy upload entrypoint remain future work.
