@@ -11,6 +11,7 @@ from pathlib import Path
 from narration_policy import check_unattended_narration
 from narration_quality import inspect_wav
 from private_upload import upload_daily
+from production_worker import ledger
 
 
 def verified_narration_report(root, day, manifest):
@@ -68,6 +69,21 @@ def main():
             raise ValueError("Review manifest must belong to the requested day")
         manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
         verified_narration_report(args.state, day, manifest)
+        # Approval must bind the finished MP4 as well as its clean narration.
+        with ledger(args.state) as db:
+            row = db.execute("""SELECT v.sha256, j.artifact FROM verified_exports v
+                                JOIN jobs j USING(day) WHERE v.day=? AND j.state='ready'""",
+                             (day,)).fetchone()
+        if row is None or row['artifact'] != f'renders/{day}/short.mp4':
+            raise ValueError("No ready, verified MP4 export for this date")
+        mp4 = (args.state / row['artifact']).resolve()
+        if mp4.is_symlink() or not mp4.is_relative_to(args.state.resolve()):
+            raise ValueError("Invalid verified MP4 location")
+        mp4_sha = hashlib.sha256(mp4.read_bytes()).hexdigest()
+        if mp4_sha != row['sha256']:
+            raise ValueError("Finished MP4 does not match the verified export ledger")
+        if os.getenv("SHADOW_APPROVED_VIDEO_SHA256", "").lower() != mp4_sha:
+            raise ValueError("This exact finished MP4 has not been owner-approved")
         result = upload_daily(args.state, day, os.environ)
         print("Private upload result:", result)
         return 0
