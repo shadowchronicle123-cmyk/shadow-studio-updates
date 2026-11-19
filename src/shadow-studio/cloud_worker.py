@@ -5,6 +5,7 @@ The planner persists a unique daily job, original story and rotated voice pair.
 Rendering and publishing are deliberately NOT enabled in Phase 1.
 """
 import argparse
+from contextlib import closing
 import datetime as dt
 import json
 import os
@@ -101,7 +102,7 @@ def main():
     parser.add_argument("--idea", default=None)
     args = parser.parse_args()
     dt.date.fromisoformat(args.day)
-    with open_db(args.database) as connection:
+    with closing(open_db(args.database)) as connection:
         result = plan_day(connection, args.day, idea=args.idea)
     print(json.dumps({**result, "story": json.loads(result["story"])}))
     print("PHASE 1 ONLY: No rendering, YouTube uploads, external AI or paid services performed.")
