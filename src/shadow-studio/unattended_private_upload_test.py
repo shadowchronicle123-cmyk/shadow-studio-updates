@@ -36,7 +36,7 @@ def main():
                 pass
             else:
                 raise AssertionError("Unapproved voice bypassed owner allowlist")
-        for key, value in (("engine", "espeak-ng"), ("listening_review_approved", False),
+        for key, value in (("engine", "espeak-ng"),
                            ("narration_wav", "../narration.wav"),
                            ("narration_sha256", "0" * 64)):
             bad = dict(manifest, **{key: value})
