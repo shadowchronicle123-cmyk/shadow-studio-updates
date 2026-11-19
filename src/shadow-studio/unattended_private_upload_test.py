@@ -27,9 +27,9 @@ def main():
                     "listening_review_approved": True,
                     "narration_wav": f"renders/{day}/narration.wav",
                     "narration_sha256": hashlib.sha256(wav_path.read_bytes()).hexdigest()}
-        with patch.dict(os.environ, {"SHADOW_APPROVED_VOICE_IDS": "en-US-AriaNeural", "SHADOW_NARRATION_REVIEW_APPROVED": "1"}):
+        with patch.dict(os.environ, {"SHADOW_APPROVED_VOICE_IDS": "en-US-AriaNeural", "SHADOW_NARRATION_REVIEW_APPROVED": "1", "SHADOW_APPROVED_NARRATION_SHA256": manifest["narration_sha256"]}):
             assert verified_narration_report(root, day, manifest)["passed"]
-        with patch.dict(os.environ, {"SHADOW_APPROVED_VOICE_IDS": "", "SHADOW_NARRATION_REVIEW_APPROVED": "1"}):
+        with patch.dict(os.environ, {"SHADOW_APPROVED_VOICE_IDS": "", "SHADOW_NARRATION_REVIEW_APPROVED": "1", "SHADOW_APPROVED_NARRATION_SHA256": manifest["narration_sha256"]}):
             try:
                 verified_narration_report(root, day, manifest)
             except ValueError:
@@ -48,13 +48,23 @@ def main():
             else:
                 raise AssertionError(f"Unsafe narration was accepted: {key}")
         with patch.dict(os.environ, {"SHADOW_APPROVED_VOICE_IDS": "en-US-AriaNeural",
-                                     "SHADOW_NARRATION_REVIEW_APPROVED": "0"}):
+                                     "SHADOW_NARRATION_REVIEW_APPROVED": "0",
+                                     "SHADOW_APPROVED_NARRATION_SHA256": manifest["narration_sha256"]}):
             try:
                 verified_narration_report(root, day, manifest)
             except ValueError:
                 pass
             else:
                 raise AssertionError("Unapproved narration bypassed worker review")
+        with patch.dict(os.environ, {"SHADOW_APPROVED_VOICE_IDS": "en-US-AriaNeural",
+                                     "SHADOW_NARRATION_REVIEW_APPROVED": "1",
+                                     "SHADOW_APPROVED_NARRATION_SHA256": "0" * 64}):
+            try:
+                verified_narration_report(root, day, manifest)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Different narration bypassed exact-audio approval")
     print("PASS unattended private-upload entrypoint rejects robotic and unreviewed narration")
 
 
