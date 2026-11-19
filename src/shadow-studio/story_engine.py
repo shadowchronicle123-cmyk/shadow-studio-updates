@@ -1,5 +1,6 @@
 """Original templates only. Ollama option stays on local machine."""
-import os, json, re, requests
+import os, json, random, re, requests
+from story_presets import STORIES
 
 def make_story(idea, style="messages", target=45):
     idea = re.sub(r'\s+', ' ',idea).strip()[:350]
@@ -28,6 +29,30 @@ def make_story(idea, style="messages", target=45):
       ('Me','Now I have to decide whether to confront them or walk away.'),
       ('Friend','What would you do if you were me?')]
     return {'title':idea[:85].rstrip('.!?')+'... 😳 #Shorts','lines':[{'speaker':a,'text':b} for a,b in lines],'source':'template'}
+
+def random_story(genre="random", target=45):
+    """Choose and vary a complete outline with a duration-appropriate number of beats."""
+    if genre == "random":
+        genre = random.choice(tuple(STORIES))
+    if genre not in STORIES:
+        raise ValueError("Choose a supported story genre")
+    title, beats = random.choice(STORIES[genre])
+    if target <= 30:
+        indices = (0, 1, 2, 5, 7)
+    elif target <= 45:
+        indices = (0, 1, 2, 4, 5, 7)
+    else:
+        indices = range(len(beats))
+    lines = []
+    for index in indices:
+        speaker, *variants = beats[index]
+        text, alternate = random.sample(variants, 2)
+        lines.append({"speaker": speaker, "text": text, "alternate": alternate,
+                      "pause_before": (0.8 if index == 5 else 0)})
+    return {"title": title + " #Shorts", "lines": lines, "source": "original",
+            "genre": genre}
+
+
 
 def metadata(story):
     title=story['title'][:100]
