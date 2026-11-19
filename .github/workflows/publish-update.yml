@@ -1,4 +1,4 @@
-name: Publish Shadow Studio update
+name: Verify and publish uploaded Shadow Studio updates
 on:
   push:
     branches: [main]
@@ -8,55 +8,88 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: shadow-studio-release
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: true
-      - name: Validate release and build manifest
+      - name: Validate ZIP, protect against downgrades and generate manifest
         shell: bash
         run: |
           python - <<'PY'
           import hashlib, json, pathlib, re, sys, zipfile
           docs = pathlib.Path("docs")
-          choices = []
+          options = []
           for file in docs.glob("shadow-studio-v*.zip"):
-              match = re.match(r"^shadow-studio-v(\d+)\.(\d+)(?:\.(\d+))?[-.]?.*\.zip$", file.name)
-              if match:
-                  choices.append((tuple(int(v or 0) for v in match.groups()), file))
-          if not choices:
-              sys.exit("No versioned Shadow Studio ZIP available")
-          version, file = max(choices, key=lambda item: item[0])
+              m = re.fullmatch(r"shadow-studio-v(\d+)\.(\d+)(?:\.(\d+))?[-.].*\.zip", file.name)
+              if m:
+                  v = tuple(int(x or 0) for x in m.groups())
+                  options.append((v, file))
+          if not options:
+              sys.exit("No versioned release ZIP found in docs")
+          version, file = max(options)
+          if file.stat().st_size > 80 * 1024 * 1024:
+              sys.exit("Release ZIP exceeds updater size limit")
           with zipfile.ZipFile(file) as archive:
-              bad = archive.testzip()
-              if bad:
-                  sys.exit(f"Corrupted ZIP member: {bad}")
-              members = archive.namelist()
-              if not any(name.endswith("/app.py") or name == "app.py" for name in members):
-                  sys.exit("ZIP does not contain app.py")
-              if any(name.endswith("/.env") or name == ".env" for name in members):
-                  sys.exit("Private .env must not be published")
-          digest = hashlib.sha256(file.read_bytes()).hexdigest()
+              if archive.testzip():
+                  sys.exit("Release ZIP integrity check failed")
+              paths = set(archive.namelist())
+              if "shadow-studio/app.py" not in paths or "shadow-studio/renderer.py" not in paths:
+                  sys.exit("Release is missing required application files")
+              for info in archive.infolist():
+                  name = pathlib.PurePosixPath(info.filename)
+                  if name.is_absolute() or ".." in name.parts:
+                      sys.exit("Unsafe ZIP path")
+                  if name.name == ".env" or ".venv" in name.parts:
+                      sys.exit("Private credentials or environment in ZIP")
+          sha = hashlib.sha256(file.read_bytes()).hexdigest()
+          next_version = ".".join(map(str, version))
+          manifest_path = docs / "latest.json"
+          previous = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+          previous_version = tuple(int(x) for x in (str(previous.get("version", "0.0.0")).split(".") + ["0","0"])[:3])
+          if version < previous_version:
+              sys.exit("Refusing to downgrade update manifest")
+          if version == previous_version and previous.get("sha256") != sha:
+              sys.exit("Refusing to replace an existing version with different bytes")
           manifest = {
-              "version": ".".join(map(str, version)),
-              "url": f"https://shadowchronicle123-cmyk.github.io/shadow-studio-updates/{file.name}",
-              "sha256": digest,
+              "version": next_version,
+              "url": "https://shadowchronicle123-cmyk.github.io/shadow-studio-updates/" + file.name,
+              "sha256": sha,
           }
-          (docs / "latest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-          print("Prepared verified update:", manifest["version"], digest)
+          manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+          print("Verified release:", next_version, "checksum:", sha)
           PY
-      - name: Commit release feed
+      - name: Commit verified update manifest
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add docs/latest.json
-          if git diff --cached --quiet; then
-            echo "Update feed already current"
-            exit 0
+          if ! git diff --cached --quiet; then
+            git commit -m "Publish verified Shadow Studio update feed"
+            git push
           fi
-          git commit -m "Publish verified Shadow Studio update feed"
-          git push
+      - name: Upload website for GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy:
+    needs: validate
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy verified release to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
