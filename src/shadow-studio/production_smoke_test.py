@@ -48,6 +48,12 @@ def main():
                 {'speaker':'Friend','text':'The captions and audio must match the scene length.', 'pause_before': 1.5},
             ]}
             video = renderer.generate(story, destination, style='messages', resolution='720p')
+            from narration_quality import inspect_wav
+            stem = Path(video['narration_path'])
+            assert stem.is_file() and stem.parent == destination
+            stem_report = inspect_wav(stem)
+            assert stem_report['passed'], stem_report
+            print('PASS separate unmixed narration WAV exported and audio-checked')
             report = analyze(video['path'])
             assert report['passed'], report['blockers']
             assert report['width'] == 720 and report['height'] == 1280
