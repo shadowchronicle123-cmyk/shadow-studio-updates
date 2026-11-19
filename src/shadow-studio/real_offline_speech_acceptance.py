@@ -53,6 +53,18 @@ def probe_audio(path):
     return len(samples) / 16000, sum(sample * sample for sample in samples) / len(samples)
 
 
+def contains_phrase(recognized, expected):
+    """Match complete Unicode word tokens, never substrings."""
+    def tokens(value):
+        return re.findall(r"\w+", value.casefold(), flags=re.UNICODE)
+    expected_tokens = tokens(expected)
+    heard_tokens = tokens(recognized)
+    if not expected_tokens:
+        raise ValueError("Expected phrase must contain at least one word")
+    return any(heard_tokens[i:i + len(expected_tokens)] == expected_tokens
+               for i in range(len(heard_tokens) - len(expected_tokens) + 1))
+
+
 def run():
     model_dir = Path(require_env("SHADOW_ASR_MODEL_DIR")).resolve(strict=True)
     speech_clip = Path(require_env("SHADOW_ASR_SPEECH_CLIP")).resolve(strict=True)
@@ -67,15 +79,7 @@ def run():
     duration = probe_clip_duration(speech_clip)
     words = transcribe_with_faster_whisper(speech_clip, model, clip_duration=duration)
     recognized = " ".join(w["text"] for w in words).casefold()
-    def tokens(value):
-        return re.findall(r"\w+", value.casefold(), flags=re.UNICODE)
-    expected_tokens = tokens(expected)
-    heard_tokens = tokens(recognized)
-    if not expected_tokens:
-        raise ValueError("Expected phrase must contain at least one word")
-    found = any(heard_tokens[i:i + len(expected_tokens)] == expected_tokens
-                for i in range(len(heard_tokens) - len(expected_tokens) + 1))
-    if not found:
+    if not contains_phrase(recognized, expected):
         raise AssertionError(f"Expected spoken phrase {expected!r} not recognized: {recognized!r}")
     with tempfile.TemporaryDirectory(prefix="shadow-real-asr-") as directory:
         output = Path(directory) / "captioned.mp4"
