@@ -41,4 +41,24 @@ with tempfile.TemporaryDirectory() as folder:
         raise AssertionError("Existing video overwritten")
     assert output.read_bytes() == original
     assert source.is_file()
-print("PASS offline MP4 render, video geometry, preserved AAC audio and overwrite protection")
+    bad_output = root / "invalid.mp4"
+    try:
+        render_local_clip(source, [{"text": "BAD", "start": 0.7, "end": 0.2}], bad_output)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Invalid transcript accepted")
+    assert not bad_output.exists(), "Invalid transcript created output"
+    try:
+        render_local_clip(source, words, root / "." / "source.mp4")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Source video overwrite allowed")
+    try:
+        render_local_clip(source, words, root / "not-a-video.mov")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Non-MP4 output extension accepted")
+print("PASS offline MP4 render, audio, invalid timing rejection and overwrite protection")
