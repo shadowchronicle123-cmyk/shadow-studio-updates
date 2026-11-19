@@ -61,15 +61,15 @@ def verified_narration_report(root, day, manifest):
 def verify_approved_video(root, day):
     """Verify exact owner-approved MP4 against the production ledger, offline."""
     # Approval must bind the finished MP4 as well as its clean narration.
-    with ledger(args.state) as db:
+    with ledger(root) as db:
         row = db.execute("""SELECT v.sha256, j.artifact FROM verified_exports v
                             JOIN jobs j USING(day) WHERE v.day=? AND j.state='ready'""",
                          (day,)).fetchone()
     if row is None or row['artifact'] != f'renders/{day}/short.mp4':
         raise ValueError("No ready, verified MP4 export for this date")
-    mp4_source = args.state / row['artifact']
+    mp4_source = root / row['artifact']
     mp4 = mp4_source.resolve()
-    if mp4_source.is_symlink() or not mp4.is_relative_to(args.state.resolve()):
+    if mp4_source.is_symlink() or not mp4.is_relative_to(root.resolve()):
         raise ValueError("Invalid verified MP4 location")
     with mp4.open("rb") as video_file:
         mp4_sha = hashlib.file_digest(video_file, "sha256").hexdigest()
