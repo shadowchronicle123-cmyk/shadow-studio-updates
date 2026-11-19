@@ -1,6 +1,6 @@
 # ShadowChronicles production integration
 
-This branch brings the story worker and licensed clip previews into one Shadow Studio build. The public updater remains on v0.43.0. The publishing target is the existing ShadowChronicles channel.
+PR #9 merged as `b63ac5eb7d305c1fa5211d6022b5315f3dff9ef4` on `main` and brings the story worker and licensed clip previews into one Shadow Studio build. The public updater remains on v0.43.0. The publishing target is the existing ShadowChronicles channel.
 
 | Area | Implementation | Remaining acceptance |
 | --- | --- | --- |
@@ -14,12 +14,12 @@ This branch brings the story worker and licensed clip previews into one Shadow S
 - [PR #4 worker](https://github.com/shadowchronicle123-cmyk/shadow-studio-updates/pull/4) at `010cb7084f9bf4bff1a579262d447aca3faf6eec`.
 - [PR #5 clip preview](https://github.com/shadowchronicle123-cmyk/shadow-studio-updates/pull/5) at `45501d358d06069f6444fb742b8aff8c6306d263`.
 - See [worker deployment and QA](WORKER_PROGRESS.md) and the [experiment and clip workflow](docs/ONE_CHANNEL_FORMAT_EXPERIMENT.md).
-- The combined browser test opens the normal production app, exports a story, and renders a rights-checked clip preview. It records synthetic evidence. Network OAuth and upload tests use mock responses.
+- [Combined cloud QA](https://github.com/shadowchronicle123-cmyk/shadow-studio-updates/actions/runs/44566529088) passed four Windows Server/Python jobs and Linux, including real eSpeak narration, the 30–60-second worker export, and a mocked private upload of the exact rendered bytes. The [production acceptance workflow](https://github.com/shadowchronicle123-cmyk/shadow-studio-updates/actions/runs/44566529529) also passed Windows and Linux.
+- The [Windows browser evidence](https://github.com/shadowchronicle123-cmyk/shadow-studio-updates/actions/runs/44566529088/artifacts/14553040806) includes both verified 1080×1920, 30 FPS MP4 fixtures. The separate story editor export is 28.033 s and the streamer preview is 3.500 s. Both have matching audio and video durations.
 
 ## Next checkpoint
 
-1. Finish the combined Windows and Linux checks and review generated MP4 evidence. Fix any failed browser or FFmpeg case before merging.
-2. Run the deployment rehearsal on a confirmed free Linux host. Complete the single existing channel’s OAuth consent and inspect the first unattended private upload in YouTube Studio.
-3. Add clip review and approved-source management before scheduling clip uploads. Keep public publishing disabled until separately authorized. Ship an app update after validating the complete upgrade and rollback.
+1. Run the deployment rehearsal on a confirmed free Linux host. Complete the single existing channel’s OAuth consent and inspect the first unattended private upload in YouTube Studio.
+2. Add clip review and approved-source management before scheduling clip uploads. Keep public publishing disabled until separately authorized. Ship an app update after validating the complete upgrade and rollback.
 
 No credentials, owner footage, public posts, paid resources, or channel changes are part of this branch.
