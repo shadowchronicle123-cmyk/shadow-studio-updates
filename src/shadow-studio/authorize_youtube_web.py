@@ -118,10 +118,10 @@ def handler_for(enrollment):
         def log_message(self, fmt, *args):
             pass  # Never log paths, authorization codes, query strings or setup keys
 
-        def reply(self, status, message, location=None):
+        def reply(self, status, message, location=None, *, referrer_policy="no-referrer"):
             self.send_response(status)
             self.send_header('Cache-Control', 'no-store')
-            self.send_header('Referrer-Policy', 'no-referrer')
+            self.send_header('Referrer-Policy', referrer_policy)
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('Content-Security-Policy', "default-src 'none'; form-action 'self'; frame-ancestors 'none'")
             if location:
@@ -146,14 +146,15 @@ def handler_for(enrollment):
                 return self.reply(200, 'Enter your private setup key.</p>'
                                   '<form method="post" action="/oauth/start">'
                                   '<label>Setup key <input name="key" type="password" required></label>'
-                                  '<button>Continue to Google</button></form><p>')
+                                  '<button>Continue to Google</button></form><p>',
+                                  referrer_policy='same-origin')
             if url.path == '/oauth/complete' and not url.query and enrollment.output.is_file():
                 return self.reply(200, 'Shadow Studio authorization saved. Automatic uploads remain disabled.')
             if url.path == '/oauth/callback':
-                query = parse_qs(url.query)
+                query = parse_qs(url.query, keep_blank_values=True)
                 if query.get('error'):
                     return self.reply(400, 'Google authorization was declined')
-                if not {'state', 'code'} <= query.keys() or any(len(v) != 1 for v in query.values()):
+                if not {'state', 'code'} <= query.keys() or any(len(v) != 1 for v in query.values()) or not all(query[k][0] for k in ('state', 'code')):
                     return self.reply(400, 'Invalid callback')
                 try:
                     enrollment.finish(query['state'][0], query['code'][0])
