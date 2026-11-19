@@ -4,6 +4,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 from voice_engine import create_voice
 from audio_mix import line_sound, mix_audio
+from captions import save_scene_subtitles
 
 W,H=540,960
 FONT_PATHS=['C:/Windows/Fonts/arial.ttf','C:/Windows/Fonts/segoeui.ttf','/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf']
@@ -171,33 +172,6 @@ def line_pause(line):
     if not 0 <= pause <= 10:
         raise ValueError('Line pauses must be between 0 and 10 seconds')
     return pause
-
-
-def _srt_time(seconds):
-    milliseconds = max(0, round(seconds * 1000))
-    hours, remainder = divmod(milliseconds, 3_600_000)
-    minutes, remainder = divmod(remainder, 60_000)
-    secs, millis = divmod(remainder, 1000)
-    return f'{hours:02}:{minutes:02}:{secs:02},{millis:03}'
-
-
-def save_scene_subtitles(story, durations, destination, narration=None):
-    """One timestamped cue per narrated scene, aligned to the generated audio timeline.
-
-    This SRT is editable in conventional video editors; it isn't word-aligned.
-    """
-    position = 0.0
-    blocks = []
-    for i, (line, duration) in enumerate(zip(story['lines'], durations), 1):
-        text = ' '.join(str(line['text']).split())
-        if not text:
-            position += duration
-            continue
-        offset, spoken = narration[i-1] if narration is not None else (0, duration)
-        start = position + offset
-        blocks.append(f'{i}\n{_srt_time(start)} --> {_srt_time(start + spoken)}\n{text}\n')
-        position += duration
-    Path(destination).write_text('\n'.join(blocks), encoding='utf-8')
 
 
 SCENE_PACING = {"snappy": (0.2, 1.2), "normal": (0.5, 2.25), "deliberate": (0.85, 2.6)}

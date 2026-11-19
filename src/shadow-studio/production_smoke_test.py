@@ -48,7 +48,7 @@ def main():
             assert report['fps'] >= 29.9, report['fps']
             captions = (destination / 'captions.srt').read_text(encoding='utf-8')
             assert '-->' in captions and story['lines'][0]['text'] in captions
-            assert story['lines'][1]['text'] in captions
+            assert story['lines'][1]['text'] in ' '.join(captions.split())
             assert '00:00:03,767 --> 00:00:05,492' in captions, captions
             assert '00:00:00,000 --> 00:00:01,225' in captions, captions
             assert report['audio_present'] and report['max_volume_db'] is not None

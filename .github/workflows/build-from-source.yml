@@ -26,6 +26,26 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: src/shadow-studio/requirements.txt
+      - name: Install export test dependencies
+        run: |
+          if ! command -v ffmpeg || ! command -v ffprobe; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
+          python -m pip install packaging -r src/shadow-studio/requirements.txt
+      - name: Run offline release tests
+        working-directory: src/shadow-studio
+        run: |
+          python self_test.py
+          python integration_test.py
+          python production_smoke_test.py
+          python audio_mix_test.py
+          python integration_acceptance_v027.py
       - name: Test, package, and verify release
         id: package
         shell: bash

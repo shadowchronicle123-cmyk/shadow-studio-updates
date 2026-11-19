@@ -65,7 +65,11 @@ def main():
         assert (report['width'], report['height'], report['fps']) == (720,1280,30)
         assert report['audio_present']
         subtitles = (movie.parent/'captions.srt').read_text(encoding='utf-8')
-        assert '-->' in subtitles and story['lines'][0]['text'] in subtitles and story['lines'][1]['text'] in subtitles
+        from captions import read_captions
+        cues = read_captions(movie.parent/'captions.srt')
+        transcript = ' '.join(' '.join(cue['text'].split()) for cue in cues)
+        assert transcript == ' '.join(line['text'] for line in story['lines'])
+        assert len(cues) >= len(story['lines']) and all(cue['start'] < cue['end'] for cue in cues)
         print('PASS: real vertical MP4, non-silent audio and timed captions')
 
         original_out = app.OUT

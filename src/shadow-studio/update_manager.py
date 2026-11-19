@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-VERSION = '0.34.0'
+VERSION = '0.35.0'
 PRESERVE = {'.env', '.venv', 'outputs', 'projects', 'uploads', 'gameplay', 'clips', 'media', 'backups', 'update_backups', 'config.json'}
 MANIFEST_LIMIT = 32768
 ZIP_LIMIT = 80 * 1024 * 1024
