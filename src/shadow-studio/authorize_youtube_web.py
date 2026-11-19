@@ -19,7 +19,7 @@ from urllib.parse import urlencode, urlsplit, parse_qs
 
 import requests
 from authorize_youtube import AUDIENCES, SCOPES, write_config
-from private_upload import TOKEN
+from private_upload import TOKEN, verify_channel
 
 AUTH = 'https://accounts.google.com/o/oauth2/v2/auth'
 MAX_QUERY = 4096
@@ -62,9 +62,11 @@ class Enrollment:
         self.lock = threading.Lock()
 
     def begin(self, key):
-        if not hmac.compare_digest(key, self.setup_key):
+        if not hmac.compare_digest(key.encode(), self.setup_key.encode()):
             raise ValueError('Invalid setup key')
         with self.lock:
+            self.pending = {state: entry for state, entry in self.pending.items()
+                            if entry[1] > time.monotonic()}
             if self.used or self.pending:
                 raise ValueError('Enrollment already started')
             state = secrets.token_urlsafe(32)
@@ -93,7 +95,9 @@ class Enrollment:
             if response.status_code != 200:
                 raise ValueError('Google token exchange failed')
             payload = response.json()
-            if not isinstance(payload, dict) or not payload.get('access_token'):
+            if (not isinstance(payload, dict) or payload.get('token_type', '').lower() != 'bearer'
+                    or not all(isinstance(payload.get(field), str) and payload[field]
+                               for field in ('access_token', 'refresh_token'))):
                 raise ValueError('Missing access token')
             granted = set(payload.get('scope', '').split())
             if not set(SCOPES).issubset(granted):
@@ -103,7 +107,8 @@ class Enrollment:
                 refresh_token = payload.get('refresh_token')
                 client_id = self.client['client_id']
                 client_secret = self.client['client_secret']
-            write_config(self.output, Credentials, self.channel, self.audience, False)
+            write_config(self.output, Credentials, self.channel, self.audience, False,
+                         verify=lambda token, channel, _: verify_channel(token, channel, self.http))
         except Exception:
             raise ValueError('Authorization failed; restart enrollment and inspect server diagnostics') from None
 
@@ -118,7 +123,7 @@ def handler_for(enrollment):
             self.send_header('Cache-Control', 'no-store')
             self.send_header('Referrer-Policy', 'no-referrer')
             self.send_header('X-Content-Type-Options', 'nosniff')
-            self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'")
+            self.send_header('Content-Security-Policy', "default-src 'none'; form-action 'self'; frame-ancestors 'none'")
             if location:
                 self.send_header('Location', location)
             body = ('<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -131,28 +136,48 @@ def handler_for(enrollment):
         def do_GET(self):
             if len(self.path) > MAX_QUERY:
                 return self.reply(414, 'Request too long')
-            url = urlsplit(self.path)
+            try:
+                url = urlsplit(self.path)
+            except ValueError:
+                return self.reply(400, 'Invalid request')
             if url.path == '/oauth/start':
-                query = parse_qs(url.query)
-                if set(query) != {'key'} or len(query['key']) != 1:
-                    return self.reply(403, 'Invalid enrollment link')
-                try:
-                    destination = enrollment.begin(query['key'][0])
-                except ValueError:
-                    return self.reply(403, 'Enrollment unavailable')
-                return self.reply(302, 'Redirecting to Google', destination)
+                if url.query:
+                    return self.reply(400, 'Use the enrollment form')
+                return self.reply(200, 'Enter your private setup key.</p>'
+                                  '<form method="post" action="/oauth/start">'
+                                  '<label>Setup key <input name="key" type="password" required></label>'
+                                  '<button>Continue to Google</button></form><p>')
+            if url.path == '/oauth/complete' and not url.query and enrollment.output.is_file():
+                return self.reply(200, 'Shadow Studio authorization saved. Automatic uploads remain disabled.')
             if url.path == '/oauth/callback':
                 query = parse_qs(url.query)
                 if query.get('error'):
                     return self.reply(400, 'Google authorization was declined')
-                if set(query) != {'state', 'code'} or any(len(v) != 1 for v in query.values()):
+                if not {'state', 'code'} <= query.keys() or any(len(v) != 1 for v in query.values()):
                     return self.reply(400, 'Invalid callback')
                 try:
                     enrollment.finish(query['state'][0], query['code'][0])
                 except ValueError:
                     return self.reply(400, 'Authorization failed. Contact the server operator.')
-                return self.reply(200, 'Shadow Studio authorization saved securely. Private uploads remain disabled.')
+                return self.reply(303, 'Authorization saved', '/oauth/complete')
             return self.reply(404, 'Not found')
+        def do_POST(self):
+            if self.path != '/oauth/start':
+                return self.reply(404, 'Not found')
+            if self.headers.get('Origin') != enrollment.origin:
+                return self.reply(403, 'Invalid enrollment origin')
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 < length <= MAX_QUERY or self.headers.get_content_type() != 'application/x-www-form-urlencoded':
+                    raise ValueError()
+                query = parse_qs(self.rfile.read(length).decode('ascii'), strict_parsing=True)
+                if set(query) != {'key'} or len(query['key']) != 1:
+                    raise ValueError()
+                destination = enrollment.begin(query['key'][0])
+            except ValueError:
+                return self.reply(403, 'Enrollment unavailable')
+            return self.reply(303, 'Redirecting to Google', destination)
+
     return Handler
 
 
@@ -170,7 +195,7 @@ def main():
                             args.channel_id, args.audience, key)
     server = ThreadingHTTPServer(('127.0.0.1', args.port), handler_for(enrollment))
     print('OAuth enrollment server listening on localhost. Configure HTTPS proxy to /oauth/.')
-    print('Create the enrollment URL privately: PUBLIC_ORIGIN/oauth/start?key=SETUP_KEY')
+    print('Open PUBLIC_ORIGIN/oauth/start and enter the setup key privately.')
     server.serve_forever()
 
 

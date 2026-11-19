@@ -65,6 +65,7 @@ jobs:
             'windows_voice_test.py',
             'production_worker_test.py',
             'private_upload_test.py',
+            'authorize_youtube_web_test.py',
             'streamer_preview_test.py'
           )
           foreach ($test in $tests) {
@@ -124,6 +125,7 @@ jobs:
           python migration_acceptance_test.py
           python production_worker_test.py --real
           python private_upload_test.py
+          python authorize_youtube_web_test.py
           python streamer_preview_test.py
 
   candidate:

@@ -10,8 +10,8 @@ production hosting, live private upload, or Windows end-to-end test is claimed.
    example `https://oauth.example.com`. This is a placeholder, **not a deployed
    address**. The host can be the future worker host. Do not buy hosting without
    explicit approval. The public reverse proxy must terminate TLS and forward
-   only `/oauth/start` and `/oauth/callback` to `127.0.0.1:8765`.
-   Disable access logging for both routes (especially query strings), rate-limit
+   only `/oauth/start`, `/oauth/callback` and `/oauth/complete` to `127.0.0.1:8765`.
+   Disable access logging for all three routes (especially callback query strings) and request-body logging, rate-limit
    the start route, and do not expose the backend port. No other endpoints are
    needed. The app intentionally ignores forwarded headers.
 2. In Google Cloud Console select the owner project with YouTube Data API v3
@@ -38,9 +38,8 @@ production hosting, live private upload, or Windows end-to-end test is claimed.
 
    Set the audience to the owner's correct designation. The output must be a
    **new** path on private storage, with restricted parent-directory access.
-5. Privately assemble `https://oauth.example.com/oauth/start?key=YOUR_SETUP_KEY`
-   on the iPhone and open it in Safari. Do not share that URL in chat or GitHub.
-   The link is single-use, expires after five minutes once opened, and Google
+5. Open `https://oauth.example.com/oauth/start` in Safari and enter the setup key in the form.
+   Keep the key private. The authorization attempt is single-use and expires after five minutes, and Google
    redirects to the exact HTTPS callback. Google may require app verification
    or a test user; Testing-mode refresh tokens can expire quickly.
 6. After consent, the server verifies `channels.list(mine=true)` matches the
@@ -55,11 +54,7 @@ production hosting, live private upload, or Windows end-to-end test is claimed.
 - State and PKCE are random per attempt; the state is single-use and consumed
   before token exchange. The token exchange occurs only on the trusted host.
   Callback errors do not echo codes, tokens, or Google error descriptions.
-- The setup URL contains a bearer setup key. **Reverse-proxy access logs,
-  analytics, browser history, and shared screenshots can leak it.** Disable
-  logging for enrollment routes, avoid analytics, keep the URL private, and
-  rotate the setup key after use. A compromised setup key can initiate the
-  one permitted enrollment, but not read stored worker credentials.
+- The setup key is sent in a same-origin form body. Disable access and request-body logging, keep the setup key private, and rotate it after use.
 - The server is a minimal localhost HTTP backend, **not an HTTPS server**.
   Production requires a correctly configured trusted TLS reverse proxy,
   firewall, DNS, certificate, and persistent private worker storage.
