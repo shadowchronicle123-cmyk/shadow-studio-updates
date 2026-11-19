@@ -1,0 +1,89 @@
+name: Shadow Studio cloud Windows compatibility QA
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/cloud-windows-qa.yml'
+      - 'src/shadow-studio/**'
+permissions:
+  contents: read
+concurrency:
+  group: shadow-cloud-windows-qa-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows-qa:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+        python: ['3.12', '3.13']
+    env:
+      PYTHONUTF8: '1'
+      SHADOW_OLLAMA_MODEL: ''
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: src/shadow-studio
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: src/shadow-studio/requirements.txt
+      - name: Ensure FFmpeg and FFprobe are installed
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -or -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $env:PATH += ';C:\ProgramData\chocolatey\bin'
+          }
+          ffmpeg -version
+          ffprobe -version
+      - name: Install free Python dependencies
+        run: python -m pip install --timeout 30 --retries 2 -r requirements.txt
+      - name: Execute real offline integration and render tests
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tests = @(
+            'self_test.py',
+            'story_expansion_test.py',
+            'production_smoke_test.py',
+            'conversation_test.py',
+            'audio_mix_test.py',
+            'batch_render_test.py',
+            'integration_test.py',
+            'integration_acceptance_v027.py',
+            'cloud_handoff_test.py',
+            'update_manager_test.py',
+            'migration_acceptance_test.py',
+            'windows_voice_test.py'
+          )
+          foreach ($test in $tests) {
+            Write-Host "Running $test"
+            python $test
+            if ($LASTEXITCODE -ne 0) { throw "$test failed with exit code $LASTEXITCODE" }
+          }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Browser acceptance with screenshots
+        run: |
+          npm install --no-save --no-package-lock playwright@1.56.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force browser-evidence | Out-Null
+          $env:SHADOW_BROWSER_CHANNEL = 'chrome'
+          $env:SHADOW_ARTIFACT_DIR = 'browser-evidence'
+          node browser_acceptance.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload visual evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shadow-windows-qa-${{ matrix.os }}-py${{ matrix.python }}
+          path: src/shadow-studio/browser-evidence/
+          if-no-files-found: warn
+          retention-days: 7
