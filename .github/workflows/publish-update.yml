@@ -1,0 +1,62 @@
+name: Publish Shadow Studio update
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/shadow-studio-v*.zip'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Validate release and build manifest
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json, pathlib, re, sys, zipfile
+          docs = pathlib.Path("docs")
+          choices = []
+          for file in docs.glob("shadow-studio-v*.zip"):
+              match = re.match(r"^shadow-studio-v(\d+)\.(\d+)(?:\.(\d+))?[-.]?.*\.zip$", file.name)
+              if match:
+                  choices.append((tuple(int(v or 0) for v in match.groups()), file))
+          if not choices:
+              sys.exit("No versioned Shadow Studio ZIP available")
+          version, file = max(choices, key=lambda item: item[0])
+          with zipfile.ZipFile(file) as archive:
+              bad = archive.testzip()
+              if bad:
+                  sys.exit(f"Corrupted ZIP member: {bad}")
+              members = archive.namelist()
+              if not any(name.endswith("/app.py") or name == "app.py" for name in members):
+                  sys.exit("ZIP does not contain app.py")
+              if any(name.endswith("/.env") or name == ".env" for name in members):
+                  sys.exit("Private .env must not be published")
+          digest = hashlib.sha256(file.read_bytes()).hexdigest()
+          manifest = {
+              "version": ".".join(map(str, version)),
+              "url": f"https://shadowchronicle123-cmyk.github.io/shadow-studio-updates/{file.name}",
+              "sha256": digest,
+          }
+          (docs / "latest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          print("Prepared verified update:", manifest["version"], digest)
+          PY
+      - name: Commit release feed
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/latest.json
+          if git diff --cached --quiet; then
+            echo "Update feed already current"
+            exit 0
+          fi
+          git commit -m "Publish verified Shadow Studio update feed"
+          git push
