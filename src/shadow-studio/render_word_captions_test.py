@@ -31,6 +31,20 @@ with tempfile.TemporaryDirectory() as folder:
                                   "-of", "csv=p=0", str(output)],
                                  capture_output=True, text=True, check=True, timeout=30)
     assert audio_probe.stdout.strip() == "aac", "Caption renderer dropped streamer audio"
+    # A valid AAC stream can still be truncated: compare actual decoded audio
+    # duration before and after rendering, allowing one AAC packet of padding.
+    def decoded_audio_seconds(video):
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(video)],
+            capture_output=True, text=True, check=True, timeout=30)
+        return float(result.stdout.strip())
+    source_seconds = decoded_audio_seconds(source)
+    output_seconds = decoded_audio_seconds(output)
+    assert abs(source_seconds - output_seconds) < 0.10, (
+        f"Caption rendering changed audio duration: {source_seconds} -> {output_seconds}"
+    )
     assert output.stat().st_size > 0
     original = output.read_bytes()
     try:
