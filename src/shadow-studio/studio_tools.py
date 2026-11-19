@@ -54,13 +54,23 @@ def get_project(id):
     if not p.is_file():raise FileNotFoundError(id)
     return json.loads(p.read_text(encoding='utf-8'))
 
-def clip_media(source:Path,start:float,end:float,orientation:str='vertical'):
+def clip_media(source:Path,start:float,end:float,orientation:str='vertical',*,
+               output_dir=None, width=720, height=1280, horizontal_anchor='center', normalize=False):
     if not (0<=start<end<=36000) or end-start>180:raise ValueError('Clips must be 0–180 seconds long')
     if orientation not in ('vertical','source'):raise ValueError('Invalid orientation')
-    dest=CLIPS/(uuid.uuid4().hex[:12]+'.mp4')
+    dest=(CLIPS if output_dir is None else output_dir)/(uuid.uuid4().hex[:12]+'.mp4')
     cmd=['ffmpeg','-y','-hide_banner','-loglevel','error','-ss',str(start),'-i',str(source),'-t',str(end-start)]
-    if orientation=='vertical':cmd+=['-vf','scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1,fps=30']
+    if orientation=='vertical':
+        offset={'left':'0','center':'(in_w-out_w)/2','right':'in_w-out_w'}[horizontal_anchor]
+        cmd+=['-vf',f'scale={width}:{height}:force_original_aspect_ratio=increase,'
+                     f'crop={width}:{height}:{offset},setsar=1,fps=30']
+    if normalize:
+        cmd+=['-af','loudnorm=I=-16:TP=-1.5:LRA=11','-ar','48000']
     cmd+=['-c:v','libx264','-preset','veryfast','-crf','23','-c:a','aac','-b:a','128k','-movflags','+faststart',str(dest)]
-    p=subprocess.run(cmd,capture_output=True,text=True,timeout=600)
-    if p.returncode:raise RuntimeError(p.stderr[-700:])
+    try:
+        p=subprocess.run(cmd,capture_output=True,text=True,timeout=600)
+        if p.returncode:raise RuntimeError(p.stderr[-700:])
+    except (RuntimeError, OSError, subprocess.TimeoutExpired):
+        dest.unlink(missing_ok=True)
+        raise
     return dest

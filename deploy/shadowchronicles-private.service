@@ -1,0 +1,17 @@
+[Unit]
+Description=Privately upload today's verified ShadowChronicles Short
+ConditionPathExists=%h/.config/shadowchronicles/youtube.json
+StartLimitIntervalSec=10min
+StartLimitBurst=2
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/shadow-studio
+LoadCredential=youtube.json:%h/.config/shadowchronicles/youtube.json
+ExecStart=/opt/shadow-studio/.venv/bin/python private_upload.py --daily --state %h/.local/state/shadowchronicles --timezone America/New_York
+TimeoutStartSec=7min
+Restart=on-failure
+RestartPreventExitStatus=1
+RestartSec=30s
+NoNewPrivileges=true
+UMask=0077
