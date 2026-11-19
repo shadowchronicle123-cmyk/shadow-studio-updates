@@ -9,6 +9,7 @@ on:
       - 'src/shadow-studio/render_word_captions_test.py'
       - 'src/shadow-studio/offline_transcript_adapter.py'
       - 'src/shadow-studio/offline_transcript_adapter_test.py'
+      - 'src/shadow-studio/offline_transcript_render_integration_test.py'
       - '.github/workflows/word-captions-ffmpeg-qa.yml'
   workflow_dispatch:
 permissions:
@@ -30,3 +31,4 @@ jobs:
           python word_captions_ffmpeg_test.py
           python render_word_captions_test.py
           python offline_transcript_adapter_test.py
+          python offline_transcript_render_integration_test.py
