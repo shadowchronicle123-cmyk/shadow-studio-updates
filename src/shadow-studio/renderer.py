@@ -3,6 +3,7 @@ import os, math, wave, shutil, subprocess, tempfile, textwrap
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 from voice_engine import create_voice
+from audio_mix import line_sound, mix_audio
 
 W,H=540,960
 FONT_PATHS=['C:/Windows/Fonts/arial.ttf','C:/Windows/Fonts/segoeui.ttf','/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf']
@@ -202,7 +203,8 @@ def save_scene_subtitles(story, durations, destination, narration=None):
 SCENE_PACING = {"snappy": (0.2, 1.2), "normal": (0.5, 2.25), "deliberate": (0.85, 2.6)}
 
 
-def generate(story,output_dir,style='messages',background=None,progress=None,voice='en-US-AriaNeural',second_voice=None,voice_rate=0,resolution='720p',gameplay_start=0,*,pacing='normal',captions=True):
+def generate(story,output_dir,style='messages',background=None,progress=None,voice='en-US-AriaNeural',second_voice=None,voice_rate=0,resolution='720p',gameplay_start=0,*,pacing='normal',captions=True,
+             music=None,voice_volume=100,music_volume=22):
     gap, minimum_hold = SCENE_PACING[pacing]
     if not isinstance(story, dict) or not isinstance(story.get('lines'), list) or not 1 <= len(story['lines']) <= 24:
         raise ValueError('Story requires 1 to 24 narration scenes')
@@ -210,6 +212,7 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
         if not isinstance(line, dict) or not str(line.get('text','')).strip():
             raise ValueError('Each narration scene needs non-empty text')
         line_pause(line)
+        line_sound(line)
     if resolution not in ('720p','1080p'):raise ValueError('Choose 720p or 1080p')
     out_width,out_height=(720,1280) if resolution=='720p' else (1080,1920)
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):raise RuntimeError('FFmpeg and ffprobe are required on PATH')
@@ -265,8 +268,12 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
         with wave.open(str(audio), 'wb') as track:
             track.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
             elapsed = 0.0
+            cues = []
             samples_written = 0
-            for wav, duration, (offset, _) in zip(wavs, durations, narration):
+            for line, wav, duration, (offset, _) in zip(story['lines'], wavs, durations, narration):
+                effect, adjustment = line_sound(line)
+                if effect != 'none':
+                    cues.append((effect, elapsed + offset + adjustment))
                 start = round((elapsed + offset) * 16000)
                 track.writeframes(b'\0\0' * (start - samples_written))
                 with wave.open(str(wav), 'rb') as speech:
@@ -276,6 +283,7 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
                 end = round(elapsed * 16000)
                 track.writeframes(b'\0\0' * (end - samples_written))
                 samples_written = end
+        audio = mix_audio(audio, music, cues, sum(durations), voice_volume, music_volume)
         output=output_dir/'short.mp4'
         args=['ffmpeg','-y','-loglevel','error','-i',visual,'-i',audio]
         if background and Path(background).is_file():

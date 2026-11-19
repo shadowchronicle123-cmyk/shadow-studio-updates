@@ -2,6 +2,7 @@
 import json, re, subprocess, uuid
 from pathlib import Path
 from renderer import line_pause
+from audio_mix import line_sound
 
 BASE=Path(__file__).resolve().parent
 PROJECTS=BASE/'projects'; PROJECTS.mkdir(exist_ok=True)
@@ -21,10 +22,12 @@ def save_project(data):
         line = {'speaker':s or 'Narrator','text':t,'pause_before':line_pause(l)}
         if isinstance(l.get('alternate'), str) and l['alternate'].strip():
             line['alternate'] = l['alternate'].strip()[:240]
+        effect, offset = line_sound(l)
+        line.update(sound_effect=effect, sound_offset=offset)
         cleaned.append(line)
     id=uuid.uuid4().hex[:12]
     payload={'id':id,'title':title,'lines':cleaned,'style':data.get('style','messages'),'voice':data.get('voice','en-US-AriaNeural'),'voice_rate':int(data.get('voice_rate',0)),'resolution':data.get('resolution','720p')}
-    for field in ('second_voice', 'gameplay_id', 'pacing', 'captions', 'target', 'genre', 'ending'):
+    for field in ('second_voice', 'gameplay_id', 'pacing', 'captions', 'target', 'genre', 'ending', 'music_name', 'voice_volume', 'music_volume'):
         if field in data:
             payload[field] = data[field]
     (PROJECTS/f'{id}.json').write_text(json.dumps(payload,ensure_ascii=False,indent=2),encoding='utf-8')
