@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from captions import read_captions
 from quality_check import analyze
 from renderer import generate
-from story_engine import make_story
+from story_engine import make_story, metadata
 
 VOICES = (('en-us','en-gb'), ('en-us','en-sc'), ('en-gb','en-sc'))
 MEDIA_TYPES = {'.mp4', '.mov', '.webm', '.mkv'}
@@ -144,8 +144,18 @@ def _check_export(result):
     srt = Path(result['captions_path'])
     cues = read_captions(srt) if srt.is_file() else []
     if (not cues or cues[-1]['end'] > report['duration_seconds'] + .10
+        or any(not cue['text'].strip() or not 0 <= cue['start'] < cue['end'] for cue in cues)
         or any(current['start'] < previous['end'] - .002 for previous,current in zip(cues,cues[1:]))):
-        raise ValueError('Timed captions are missing')
+        raise ValueError('Timed captions are missing or invalid')
+    frames = subprocess.run(
+        ['ffmpeg','-nostdin','-hide_banner','-v','info','-i',str(result['path']),
+         '-an','-vf','scale=270:480,blackdetect=d=1:pix_th=0.10:pic_th=0.995',
+         '-f','null','-'],
+        capture_output=True,text=True,timeout=120)
+    if frames.returncode:
+        raise ValueError('Could not verify video for blank frames')
+    if 'black_start:' in frames.stderr:
+        raise ValueError('Video contains a sustained near-black frame sequence')
     return report
 
 
@@ -194,6 +204,9 @@ def run_day(root, ideas, media, timezone='UTC', *, day=None, narrator=local_narr
                     for key,name in (('path','short.mp4'),('captions_path','captions.srt')):
                         Path(result[key]).replace(staged/name)
                     (staged/'story.json').write_text(json.dumps(script,ensure_ascii=False,indent=2),encoding='utf-8')
+                    (staged/'metadata.json').write_text(
+                        json.dumps({'content_type':'ai_story',**metadata(script)},ensure_ascii=False,indent=2),
+                        encoding='utf-8')
                     digest = artifact_checksum(staged/'short.mp4')
                     with ledger(root) as db:
                         db.commit()

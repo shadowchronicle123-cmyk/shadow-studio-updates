@@ -23,3 +23,9 @@ PR #9 merged as `b63ac5eb7d305c1fa5211d6022b5315f3dff9ef4` on `main` and brings 
 2. Add clip review and approved-source management before scheduling clip uploads. Keep public publishing disabled until separately authorized. Ship an app update after validating the complete upgrade and rollback.
 
 No credentials, owner footage, public posts, paid resources, or channel changes are part of this branch.
+
+## Story export follow-up
+
+- Daily output now includes a title, description, tags and content format in `metadata.json`. Technical acceptance rejects invalid caption intervals and sustained near-black frames before marking the video ready.
+- PR #6 has green intake safety checks. PR #7 has green pure caption planning checks. PR #8 carries the overlapping caption planner plus FFmpeg and transcription adapters, so integrate the caption stack once after reviewing its latest commit and confirming genuine model inference. The independent branches were kept intact.
+- A persistent Linux host, owner-controlled Google Desktop OAuth consent and authorized production footage are still required for a live private upload rehearsal. The worker uses the existing ShadowChronicles channel only.
