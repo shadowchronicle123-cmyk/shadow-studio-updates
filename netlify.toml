@@ -1,0 +1,20 @@
+# Static, credential-free landing page only. No OAuth endpoint is deployed.
+# Production OAuth requires durable state and protected worker-side token storage.
+[build]
+  publish = "netlify-site"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "no-referrer"
+    X-Frame-Options = "DENY"
+    Content-Security-Policy = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    Cache-Control = "no-store"
+
+# Never treat /oauth/callback as a working endpoint until it is implemented.
+[[redirects]]
+  from = "/oauth/*"
+  to = "/oauth-unavailable.html"
+  status = 200
+  force = true
