@@ -34,8 +34,9 @@ def verified_narration_report(root, day, manifest):
     if Path(relative) != expected or ".." in Path(relative).parts:
         raise ValueError("Narration WAV must belong to this day's verified render")
     root = Path(root).resolve()
-    path = (root / expected).resolve()
-    if not path.is_relative_to(root) or path.is_symlink():
+    source_path = root / expected
+    path = source_path.resolve()
+    if source_path.is_symlink() or not path.is_relative_to(root):
         raise ValueError("Invalid narration audio location")
     expected_digest = manifest.get("narration_sha256")
     if not isinstance(expected_digest, str) or len(expected_digest) != 64:
