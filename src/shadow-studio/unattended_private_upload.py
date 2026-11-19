@@ -76,8 +76,9 @@ def main():
                              (day,)).fetchone()
         if row is None or row['artifact'] != f'renders/{day}/short.mp4':
             raise ValueError("No ready, verified MP4 export for this date")
-        mp4 = (args.state / row['artifact']).resolve()
-        if mp4.is_symlink() or not mp4.is_relative_to(args.state.resolve()):
+        mp4_source = args.state / row['artifact']
+        mp4 = mp4_source.resolve()
+        if mp4_source.is_symlink() or not mp4.is_relative_to(args.state.resolve()):
             raise ValueError("Invalid verified MP4 location")
         mp4_sha = hashlib.sha256(mp4.read_bytes()).hexdigest()
         if mp4_sha != row['sha256']:
