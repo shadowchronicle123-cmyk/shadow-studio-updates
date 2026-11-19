@@ -1,0 +1,117 @@
+name: Build and publish Shadow Studio from source
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/shadow-studio/**'
+      - '.github/workflows/build-from-source.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: shadow-studio-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.package.outputs.publish }}
+      version: ${{ steps.package.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Test, package, and verify release
+        id: package
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, pathlib, py_compile, re, sys, zipfile
+          from packaging.version import Version
+          root = pathlib.Path("src/shadow-studio")
+          docs = pathlib.Path("docs")
+          if not root.is_dir():
+              sys.exit("Shadow Studio source folder not found")
+          for required in ("app.py", "update_manager.py", "requirements.txt", "renderer.py"):
+              if not (root / required).is_file():
+                  sys.exit("Missing: " + required)
+          for p in root.rglob("*.py"):
+              py_compile.compile(str(p), cfile="/tmp/shadow-check.pyc", doraise=True)
+          manager = (root / "update_manager.py").read_text()
+          match = re.search(r"(?m)^VERSION\s*=\s*['\"](\d+\.\d+\.\d+)['\"]", manager)
+          if not match:
+              sys.exit("Release version missing from update_manager.py")
+          version = match.group(1)
+          manifest_path = docs / "latest.json"
+          old = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
+          old_ver = old.get("version", "0.0.0")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write("version=" + version + "\n")
+          archive_path = pathlib.Path("/tmp/shadow-studio-v" + version + "-source.zip")
+          forbidden = {".env", ".venv", "__pycache__", "backups", "outputs", "projects", "uploads", "gameplay", "clips", ".git"}
+          source_files = []
+          for p in sorted(root.rglob("*")):
+              if not p.is_file():
+                  continue
+              rel = p.relative_to(root)
+              if any(part in forbidden for part in rel.parts):
+                  continue
+              if p.suffix.lower() in {".mp4", ".mov", ".mp3", ".wav", ".pyc", ".zip"}:
+                  continue
+              source_files.append((p, "shadow-studio/" + rel.as_posix()))
+          with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+              for p, arcname in source_files:
+                  z.write(p, arcname)
+          with zipfile.ZipFile(archive_path) as z:
+              if z.testzip() or "shadow-studio/app.py" not in z.namelist():
+                  sys.exit("Built archive failed integrity check")
+          digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+          print("Built", archive_path, "sha256", digest)
+          if Version(version) <= Version(old_ver):
+              print("No newer release: source", version, "live", old_ver)
+              with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+                  out.write("publish=false\n")
+              sys.exit(0)
+          filename = archive_path.name
+          destination = docs / filename
+          destination.write_bytes(archive_path.read_bytes())
+          manifest = {
+              "version": version,
+              "url": "https://shadowchronicle123-cmyk.github.io/shadow-studio-updates/" + filename,
+              "sha256": digest,
+          }
+          manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write("publish=true\n")
+          PY
+      - name: Commit verified ZIP and manifest
+        if: steps.package.outputs.publish == 'true'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/latest.json docs/shadow-studio-v*.zip
+          git commit -m "Release Shadow Studio v${{ steps.package.outputs.version }}"
+          git push
+      - name: Upload GitHub Pages files
+        if: steps.package.outputs.publish == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy verified update feed
+        id: deployment
+        uses: actions/deploy-pages@v4
