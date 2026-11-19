@@ -89,29 +89,17 @@ def main():
         env={'SHADOW_YOUTUBE_PRIVATE_AUTOMATION':'1','SHADOW_YOUTUBE_AUDIENCE':'not-made-for-kids',
              'SHADOW_YOUTUBE_CHANNEL_ID':CHANNEL,'SHADOW_YOUTUBE_CLIENT_ID':'fake-client-id',
              'SHADOW_YOUTUBE_CLIENT_SECRET':'fake-client-secret','SHADOW_YOUTUBE_REFRESH_TOKEN':'fake-refresh'}
+        # Daily automation must fail closed without owner-approved narration/video.
+        calls=transport.post.call_count
         blocked(lambda:private_upload.upload_daily(root,day,{},transport))
-        set_stop(root,True)
-        assert private_upload.upload_daily(root,day,env,transport)=='stopped'
-        set_stop(root,False)
-        assert private_upload.upload_daily(root,'2026-11-23',env,transport)=='no_verified_export_today'
-        assert transport.post.call_count==calls
-        transport.post.side_effect=[
-            SimpleNamespace(status_code=200,json=lambda:{'token_type':'Bearer','access_token':token}),
-            SimpleNamespace(status_code=200,headers={'Location':location}),
-        ]
+        blocked(lambda:private_upload.upload_daily(root,day,env,transport))
+        blocked(lambda:private_upload.upload_daily(root,'2026-11-23',env,transport))
         path=root/'renders'/day/'short.mp4'
         original=path.read_bytes()
         path.write_bytes(b'changed')
         blocked(lambda:private_upload.upload_daily(root,day,env,transport))
-        assert transport.post.call_count==calls+1
         path.write_bytes(original)
-        transport.post.side_effect=[
-            SimpleNamespace(status_code=200,json=lambda:{'token_type':'Bearer','access_token':token}),
-            SimpleNamespace(status_code=200,headers={'Location':location}),
-        ]
-        assert private_upload.upload_daily(root,day,env,transport)=='example1234'
-        assert private_upload.upload_daily(root,day,env,transport)=='private'
-        assert transport.post.call_count==calls+3
+        assert transport.post.call_count==calls
         with ledger(root) as db:
             assert all(not any(credential in str(tuple(row)) for credential in (token,'fake-client-secret','fake-refresh'))
                        for row in db.execute('SELECT * FROM private_uploads'))

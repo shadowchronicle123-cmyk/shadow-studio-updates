@@ -49,6 +49,10 @@ production hosting, live private upload, or Windows end-to-end test is claimed.
    real export and run the existing manually confirmed private-only test before
    separately opting into daily automation.
 
+## HTTPS reverse-proxy template
+
+An example Caddy configuration is provided at `deploy/Caddyfile.oauth.example`. It routes only the three enrollment paths to the loopback-only Python server. Before using it, choose a persistent host with private disk, point a real hostname at that host, install Caddy, and replace the placeholder hostname. Keep Caddy request access logging **disabled** for these routes; callback query strings contain sensitive authorization codes. Configure firewall restrictions and a dedicated unprivileged service account. The Python process and its private token output must remain on the same trusted host or use an authenticated, encrypted transfer to the worker. This file is an example, not a deployed service. Do not copy Google client secrets into Netlify, GitHub, or the browser.
+
 ## Security and limitations
 
 - State and PKCE are random per attempt; the state is single-use and consumed

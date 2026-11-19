@@ -193,8 +193,10 @@ def run_day(root, ideas, media, timezone='UTC', *, day=None, narrator=local_narr
                     if db.execute('SELECT 1 FROM jobs WHERE fingerprint=? AND day<>?',(fingerprint,day)).fetchone():
                         raise ValueError('Generated script is a duplicate')
                 with tempfile.TemporaryDirectory(prefix='working-',dir=output) as folder:
+                    neural = narrator.__name__ == 'neural_narration'
+                    render_voices = ('en-us', 'en-gb') if neural else voices
                     result = generate(script,folder,background=clip,resolution='1080p',
-                                      voice=voices[0],second_voice=voices[1],voice_factory=narrator,
+                                      voice=render_voices[0],second_voice=render_voices[1],voice_factory=narrator,
                                       progress=progress,target_seconds=45)
                     progress(96,'Checking export')
                     report = _check_export(result)
@@ -203,6 +205,20 @@ def run_day(root, ideas, media, timezone='UTC', *, day=None, narrator=local_narr
                     staged.mkdir()
                     for key,name in (('path','short.mp4'),('captions_path','captions.srt')):
                         Path(result[key]).replace(staged/name)
+                    narration_source = Path(result['narration_path'])
+                    if not narration_source.is_file():
+                        raise ValueError('Clean narration stem missing from render')
+                    narration_source.replace(staged/'narration.wav')
+                    engine = os.getenv('SHADOW_NARRATION_ENGINE', 'espeak').strip().lower()
+                    voice_id = (os.getenv('SHADOW_NEURAL_PRIMARY_VOICE', 'en-US-GuyNeural')
+                                if engine == 'edge-neural' else voices[0])
+                    # Generated content never self-approves its own voice.
+                    (staged/'narration-review.json').write_text(json.dumps({
+                        'engine': engine, 'voice_id': voice_id,
+                        'listening_review_approved': False,
+                        'narration_wav': f'renders/{day}/narration.wav',
+                        'narration_sha256': artifact_checksum(staged/'narration.wav')
+                    },indent=2),encoding='utf-8')
                     (staged/'story.json').write_text(json.dumps(script,ensure_ascii=False,indent=2),encoding='utf-8')
                     (staged/'metadata.json').write_text(
                         json.dumps({'content_type':'ai_story',**metadata(script)},ensure_ascii=False,indent=2),
@@ -244,8 +260,9 @@ def main():
     if args.command == 'run':
         if args.ideas is None or args.media is None:
             parser.error('run requires --ideas and --media')
+        from production_neural_voice import configured_narrator
         result = run_day(args.state,json.loads(args.ideas.read_text(encoding='utf-8')),args.media,args.timezone,
-                         invocation=os.getenv('INVOCATION_ID'))
+                         narrator=configured_narrator(), invocation=os.getenv('INVOCATION_ID'))
         print(result)
         return 1 if result=='failed' else 0
     if args.command == 'recover-service':

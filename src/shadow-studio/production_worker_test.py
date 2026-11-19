@@ -79,6 +79,12 @@ def main(real=False):
         assert record['attempts']==2 or real
         assert (controls/record['artifact']).is_file()
         folder = (controls/record['artifact']).parent
+        stem = folder/'narration.wav'
+        review = json.loads((folder/'narration-review.json').read_text(encoding='utf-8'))
+        assert stem.is_file()
+        assert review['listening_review_approved'] is False
+        assert review['narration_sha256'] == hashlib.sha256(stem.read_bytes()).hexdigest()
+        assert review['narration_wav'] == f"renders/{record['day']}/narration.wav"
         packaging = json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
         assert packaging['content_type']=='ai_story' and packaging['title']==record['title']
         assert '#Shorts' in packaging['description'] and 'shorts' in packaging['tags']
@@ -107,20 +113,26 @@ def main(real=False):
             )
         channel = 'UC'+'X'*22
         transport = Mock()
-        transport.post.side_effect = [
-            SimpleNamespace(status_code=200,json=lambda:{'token_type':'Bearer','access_token':'test-access'}),
-            SimpleNamespace(status_code=200,headers={
-                'Location':'https://www.googleapis.com/upload/youtube/v3/videos?upload_id=test'}),
-        ]
+        transport.post.return_value = SimpleNamespace(status_code=200,headers={
+            'Location':'https://www.googleapis.com/upload/youtube/v3/videos?upload_id=test'})
         transport.get.return_value = SimpleNamespace(status_code=200,json=lambda:{'items':[{'id':channel}]})
         transport.put.return_value = SimpleNamespace(status_code=201,json=lambda:{
             'id':'example1234','snippet':{'channelId':channel},'status':{'privacyStatus':'private'}})
         env = {'SHADOW_YOUTUBE_PRIVATE_AUTOMATION':'1','SHADOW_YOUTUBE_AUDIENCE':'not-made-for-kids',
                'SHADOW_YOUTUBE_CHANNEL_ID':channel,'SHADOW_YOUTUBE_CLIENT_ID':'test-client-id',
                'SHADOW_YOUTUBE_CLIENT_SECRET':'test-client-secret','SHADOW_YOUTUBE_REFRESH_TOKEN':'test-refresh'}
-        assert private_upload.upload_daily(controls,record['day'],env,transport)=='example1234'
+        try:
+            private_upload.upload_daily(controls,record['day'],env,transport)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Legacy daily upload bypassed narration approval')
+        assert transport.put.call_count == 0
+        assert private_upload.upload(controls,record['day'],hashlib.sha256((controls/record['artifact']).read_bytes()).hexdigest(),
+                                     'test-access',channel_id=channel,confirmed=True,for_kids=False,http=transport)=='example1234'
         assert transport.put.call_args.kwargs['data']==(controls/record['artifact']).read_bytes()
-        assert private_upload.upload_daily(controls,record['day'],env,transport)=='private'
+        assert private_upload.upload(controls,record['day'],hashlib.sha256((controls/record['artifact']).read_bytes()).hexdigest(),
+                                     'test-access',channel_id=channel,confirmed=True,for_kids=False,http=transport)=='private'
         assert transport.put.call_count==1
         with patch.dict('os.environ',{'SHADOW_PRODUCTION_STATE':str(controls)}):
             downloaded = TestClient(app.app).get('/api/production/render/2026-11-19')
