@@ -1,5 +1,5 @@
 """Offline story-to-video engine. Requires installed FFmpeg; voice is local OS TTS."""
-import os, math, wave, shutil, subprocess, tempfile, textwrap
+import io, os, math, wave, shutil, subprocess, tempfile
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 from voice_engine import create_voice
@@ -146,6 +146,11 @@ def gameplay_frame(path,story,index,style):
     draw.text((22, 22), 'SHADOWCHRONICLES', font=font(21, True), fill='#f4e8ff')
     recent = story['lines'][max(0, index-3):index+1]
     text_font = font(22)
+    newest = recent[-1]['text']
+    for size in (21, 20, 19, 18):
+        if len(text_wrap(draw, newest, text_font, 366)) <= 8:
+            break
+        text_font = font(size)
     blocks, total = _visible_messages(draw, recent, text_font, 366, 304,
                                       row_height=29, header_height=44, gap=9, max_lines=8)
     speakers = list(dict.fromkeys(str(line.get('speaker', 'Narrator')).strip().casefold() for line in story['lines']))
@@ -172,6 +177,50 @@ def line_pause(line):
     if not 0 <= pause <= 10:
         raise ValueError('Line pauses must be between 0 and 10 seconds')
     return pause
+
+
+def gameplay_dimensions(height):
+    panel = round(height * 0.42 / 2) * 2
+    return panel, height - panel
+
+
+def gameplay_crop(width, height):
+    return (f'scale={width}:{height}:force_original_aspect_ratio=increase:force_divisible_by=2,'
+            f'crop={width}:{height},setsar=1')
+
+
+def preview_layout(story, index, style, *, show_gameplay=False, background=None, start=0):
+    """Render one representative scene without synthesizing narration."""
+    with tempfile.TemporaryDirectory(prefix='shadow_layout_') as folder:
+        destination = Path(folder) / 'scene.png'
+        if not show_gameplay:
+            png_frame(destination, story, index, style)
+            return destination.read_bytes()
+        gameplay_frame(destination, story, index, style)
+        panel_height, gameplay_height = gameplay_dimensions(H)
+        with Image.open(destination) as source:
+            frame = source.convert('RGB')
+        if background:
+            sample = Path(folder) / 'gameplay.png'
+            args = ['ffmpeg', '-y', '-loglevel', 'error', '-threads', '1',
+                    '-ss', str(start), '-i', str(background), '-map', '0:v:0', '-frames:v', '1',
+                    '-filter_threads', '1', '-vf', gameplay_crop(W, gameplay_height), '-threads', '1', str(sample)]
+            for seek in (start, 0):
+                args[7] = str(seek)
+                result = subprocess.run(args, capture_output=True, text=True, timeout=15)
+                if result.returncode == 0 and sample.is_file():
+                    break
+            else:
+                raise RuntimeError('Could not preview the selected gameplay clip')
+            with Image.open(sample) as gameplay:
+                frame.paste(gameplay, (0, panel_height))
+        else:
+            draw = ImageDraw.Draw(frame)
+            draw.rectangle((0, panel_height, W, H), fill='#263549')
+            draw.text((24, panel_height+28), 'Gameplay placement preview', font=font(23, True), fill='white')
+        output = io.BytesIO()
+        frame.save(output, format='PNG')
+        return output.getvalue()
 
 
 SCENE_PACING = {"snappy": (0.2, 1.2), "normal": (0.5, 2.25), "deliberate": (0.85, 2.6)}
@@ -261,11 +310,9 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
         output=output_dir/'short.mp4'
         args=['ffmpeg','-y','-loglevel','error','-i',visual,'-i',audio]
         if background and Path(background).is_file():
-            panel_height = round(out_height * 0.42 / 2) * 2
-            gameplay_height = out_height - panel_height
+            panel_height, gameplay_height = gameplay_dimensions(out_height)
             filter_graph = (
-                f'[2:v]scale={out_width}:{gameplay_height}:force_original_aspect_ratio=increase:force_divisible_by=2,'
-                f'crop={out_width}:{gameplay_height},setsar=1[gameplay];'
+                f'[2:v]{gameplay_crop(out_width, gameplay_height)}[gameplay];'
                 f'[0:v]scale={out_width}:{out_height}:flags=lanczos,'
                 f'crop={out_width}:{panel_height}:0:0,setsar=1[panel];'
                 '[panel][gameplay]vstack=shortest=1,format=yuv420p[v]'
