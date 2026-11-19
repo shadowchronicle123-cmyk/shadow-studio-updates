@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from datetime import date, datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -19,6 +20,11 @@ from story_engine import make_story
 VOICES = (('en-us','en-gb'), ('en-us','en-sc'), ('en-gb','en-sc'))
 MEDIA_TYPES = {'.mp4', '.mov', '.webm', '.mkv'}
 ATTEMPTS = 2
+
+
+def artifact_checksum(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
 class Stopped(Exception):
@@ -45,6 +51,12 @@ def ledger(root):
             db.execute('''CREATE TABLE IF NOT EXISTS private_uploads (
                 day TEXT PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, state TEXT NOT NULL, video_id TEXT
             )''')
+            db.execute('''CREATE TABLE IF NOT EXISTS verified_exports (
+                day TEXT PRIMARY KEY, sha256 TEXT NOT NULL
+            )''')
+            db.execute('''CREATE TABLE IF NOT EXISTS service_claims (
+                day TEXT PRIMARY KEY, invocation TEXT NOT NULL
+            )''')
             yield db
     finally:
         db.close()
@@ -70,7 +82,7 @@ def _hash(text):
     return hashlib.sha256(' '.join(text.casefold().split()).encode('utf-8')).hexdigest()
 
 
-def reserve(root, day, ideas, clips):
+def reserve(root, day, ideas, clips, invocation=None):
     with ledger(root) as db:
         # The daily row, idea uniqueness and active-job check share a write transaction.
         db.commit()
@@ -90,7 +102,19 @@ def reserve(root, day, ideas, clips):
         clip = next((item for item in clips if not recent or item.name != recent[0]['clip']), clips[0])
         db.execute("INSERT INTO jobs (day,state,idea_hash,voice,clip) VALUES (?,'running',?,?,?)",
                    (day,_hash(premise),','.join(voice),clip.name))
+        if invocation:
+            db.execute('INSERT INTO service_claims VALUES (?,?)', (day,invocation))
         return 'reserved', (premise,voice,clip)
+
+
+def recover_service(root, invocation):
+    if not invocation:
+        raise ValueError('Recovery requires the original systemd service invocation')
+    with ledger(root) as db:
+        result = db.execute("""UPDATE jobs SET state='failed',message='Render service ended before completing the job'
+                               WHERE state='running' AND day IN
+                               (SELECT day FROM service_claims WHERE invocation=?)""",(invocation,))
+        return result.rowcount
 
 
 def local_narration(text, path, voice, rate):
@@ -125,7 +149,7 @@ def _check_export(result):
     return report
 
 
-def run_day(root, ideas, media, timezone='UTC', *, day=None, narrator=local_narration):
+def run_day(root, ideas, media, timezone='UTC', *, day=None, narrator=local_narration, invocation=None):
     root,media = Path(root),Path(media)
     if day is None:
         day = datetime.now(ZoneInfo(timezone)).date().isoformat()
@@ -134,7 +158,7 @@ def run_day(root, ideas, media, timezone='UTC', *, day=None, narrator=local_narr
                    and path.suffix.lower() in MEDIA_TYPES and path.stat().st_size <= 512*1024*1024)
     if not isinstance(ideas,list) or not all(isinstance(item,str) and 3 <= len(item.strip()) <= 350 for item in ideas):
         raise ValueError('Supply a JSON list of original story premises, 3–350 characters each')
-    state, work = reserve(root,day,ideas,clips)
+    state, work = reserve(root,day,ideas,clips,invocation)
     if work is None:
         return state
     premise, voices, clip = work
@@ -170,6 +194,7 @@ def run_day(root, ideas, media, timezone='UTC', *, day=None, narrator=local_narr
                     for key,name in (('path','short.mp4'),('captions_path','captions.srt')):
                         Path(result[key]).replace(staged/name)
                     (staged/'story.json').write_text(json.dumps(script,ensure_ascii=False,indent=2),encoding='utf-8')
+                    digest = artifact_checksum(staged/'short.mp4')
                     with ledger(root) as db:
                         db.commit()
                         db.execute('BEGIN IMMEDIATE')
@@ -178,6 +203,7 @@ def run_day(root, ideas, media, timezone='UTC', *, day=None, narrator=local_narr
                         if final.exists():
                             raise ValueError('The daily output already exists. Review the existing files.')
                         staged.rename(final)
+                        db.execute('INSERT INTO verified_exports(day,sha256) VALUES (?,?)',(day,digest))
                         db.execute("""UPDATE jobs SET state='ready',title=?,progress=100,message='Ready for review',
                                    fingerprint=?,duration=?,artifact=? WHERE day=?""",
                                    (script['title'],fingerprint,report['duration_seconds'],f'renders/{day}/short.mp4',day))
@@ -196,7 +222,7 @@ def run_day(root, ideas, media, timezone='UTC', *, day=None, narrator=local_narr
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=('run','status','stop','resume'))
+    parser.add_argument('command',choices=('run','status','stop','resume','recover-service'))
     parser.add_argument('--state',required=True,type=Path)
     parser.add_argument('--ideas',type=Path)
     parser.add_argument('--media',type=Path)
@@ -205,9 +231,16 @@ def main():
     if args.command == 'run':
         if args.ideas is None or args.media is None:
             parser.error('run requires --ideas and --media')
-        result = run_day(args.state,json.loads(args.ideas.read_text(encoding='utf-8')),args.media,args.timezone)
+        result = run_day(args.state,json.loads(args.ideas.read_text(encoding='utf-8')),args.media,args.timezone,
+                         invocation=os.getenv('INVOCATION_ID'))
         print(result)
         return 1 if result=='failed' else 0
+    if args.command == 'recover-service':
+        invocation = os.getenv('INVOCATION_ID')
+        if not invocation or not os.getenv('SERVICE_RESULT'):
+            parser.error('recover-service is for the systemd stop hook')
+        print(f'Recovered {recover_service(args.state, invocation)} interrupted production job(s)')
+        return 0
     if args.command in ('stop','resume'):
         set_stop(args.state,args.command=='stop')
     print(json.dumps(status(args.state),ensure_ascii=False,indent=2))

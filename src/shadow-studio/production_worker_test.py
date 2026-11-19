@@ -45,6 +45,13 @@ def main(real=False):
             results = list(workers.map(lambda _:worker.reserve(root/'race','2026-11-19',IDEAS,selected)[0],range(2)))
         assert sorted(results)==['daily_limit','reserved']
         assert worker.reserve(root/'race','2026-11-20',IDEAS,selected)[0]=='active_job'
+        interrupted = root/'interrupted'
+        assert worker.reserve(interrupted,'2026-11-19',IDEAS,selected,invocation='original')[0]=='reserved'
+        assert worker.recover_service(interrupted,'other') == 0
+        assert worker.recover_service(interrupted,'original') == 1
+        assert worker.recover_service(interrupted,'original') == 0
+        assert worker.reserve(interrupted,'2026-11-19',IDEAS,selected)[0]=='daily_limit'
+        assert worker.reserve(interrupted,'2026-11-20',IDEAS,selected)[0]=='reserved'
         controls = root/'control'
         with patch.dict('os.environ',{'SHADOW_PRODUCTION_STATE':str(controls)}):
             client=TestClient(app.app)
@@ -68,6 +75,10 @@ def main(real=False):
         assert 30 <= record['duration'] <= 60
         assert record['attempts']==2 or real
         assert (controls/record['artifact']).is_file()
+        with worker.ledger(controls) as db:
+            assert db.execute('SELECT sha256 FROM verified_exports WHERE day=?', (record['day'],)).fetchone()[0] == (
+                hashlib.sha256((controls/record['artifact']).read_bytes()).hexdigest()
+            )
         with patch.dict('os.environ',{'SHADOW_PRODUCTION_STATE':str(controls)}):
             downloaded = TestClient(app.app).get('/api/production/render/2026-11-19')
             assert downloaded.status_code == 200 and downloaded.content == (controls/record['artifact']).read_bytes()
