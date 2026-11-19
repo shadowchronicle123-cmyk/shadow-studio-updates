@@ -44,4 +44,26 @@ with tempfile.TemporaryDirectory() as folder:
                            check=True, capture_output=True, text=True, timeout=30)
     assert sorted(probe.stdout.split()) == ["audio", "video"], probe.stdout
     assert source.is_file() and output.stat().st_size > 0
+    # Stream presence alone is insufficient: decode the output audio and verify
+    # it is non-silent, with comparable signal strength to the input.
+    def audio_energy(video):
+        decoded = subprocess.run(
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+             "-i", str(video), "-map", "0:a:0", "-ac", "1",
+             "-ar", "16000", "-f", "s16le", "-"],
+            check=True, capture_output=True, timeout=60).stdout
+        from array import array
+        from sys import byteorder
+        samples = array("h")
+        samples.frombytes(decoded)
+        if byteorder != "little":
+            samples.byteswap()
+        assert len(samples) >= 16000, "Audio missing or unexpectedly short"
+        return sum(sample * sample for sample in samples) / len(samples)
+    source_energy = audio_energy(source)
+    rendered_energy = audio_energy(output)
+    assert source_energy > 1000, "Synthetic test audio was silent"
+    assert 0.5 < rendered_energy / source_energy < 1.5, (
+        "Rendered audio was muted or changed volume drastically"
+    )
 print("PASS mocked local-ASR to timed captions to actual MP4 with audio")
