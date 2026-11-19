@@ -1,0 +1,38 @@
+name: ShadowChronicles cloud worker Phase 1 tests
+on:
+  pull_request:
+    paths:
+      - 'src/shadow-studio/cloud_worker*.py'
+      - 'src/shadow-studio/story_engine.py'
+      - 'src/shadow-studio/story_expansion.py'
+      - 'src/shadow-studio/voice_engine.py'
+      - '.github/workflows/cloud-worker-phase1.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline-planner:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+        python: ['3.12', '3.13']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    defaults:
+      run:
+        working-directory: src/shadow-studio
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install free dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Verify offline planner, persistence, and voice rotation
+        run: python cloud_worker_test.py
+      - name: Verify CLI is idempotent
+        shell: bash
+        run: |
+          python cloud_worker.py --once --database phase1-test.sqlite3 --day 2026-11-19
+          python cloud_worker.py --once --database phase1-test.sqlite3 --day 2026-11-19
