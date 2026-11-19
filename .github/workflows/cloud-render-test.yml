@@ -9,6 +9,7 @@ on:
       - 'src/shadow-studio/authorize_youtube_web_test.py'
       - 'src/shadow-studio/creator_benchmark*.py'
       - 'src/shadow-studio/narration_quality*.py'
+      - 'src/shadow-studio/narration_policy*.py'
 
 permissions:
   contents: read
@@ -39,6 +40,8 @@ jobs:
         run: python creator_benchmark_test.py
       - name: Check narration audio integrity and voice review metrics
         run: python narration_quality_test.py
+      - name: Enforce fail-closed narration voice approval policy tests
+        run: python narration_policy_test.py
       - name: Verify private-only upload guards using mocked YouTube transport
         run: python private_upload_test.py
       - name: Verify OAuth callback security offline
