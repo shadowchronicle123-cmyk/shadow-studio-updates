@@ -15,6 +15,7 @@ on:
       - 'src/shadow-studio/word_captions_ass.py'
       - 'src/shadow-studio/word_captions_ass_test.py'
       - 'src/shadow-studio/real_offline_speech_acceptance.py'
+      - 'src/shadow-studio/real_offline_speech_acceptance_test.py'
       - '.github/workflows/word-captions-ffmpeg-qa.yml'
   workflow_dispatch:
 permissions:
@@ -33,6 +34,7 @@ jobs:
       - name: Verify actual rendered caption pixels
         working-directory: src/shadow-studio
         run: |
+          python real_offline_speech_acceptance_test.py
           python word_captions_ass_test.py
           python word_captions_ffmpeg_test.py
           python render_word_captions_test.py
