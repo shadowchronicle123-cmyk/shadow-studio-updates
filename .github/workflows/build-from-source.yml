@@ -1,8 +1,5 @@
 name: Build and publish Shadow Studio from source
 on:
-  push:
-    branches: [main]
-    paths: ['.github/workflows/build-from-source.yml']
   workflow_dispatch:
     inputs:
       approved:
@@ -26,7 +23,7 @@ concurrency:
 
 jobs:
   windows-smoke:
-    if: github.ref == 'refs/heads/main' && ((github.event_name == 'workflow_dispatch' && inputs.approved) || (github.event_name == 'push' && github.event.head_commit.message == 'Publish approved Shadow Studio v0.43.0 candidate 4b6bca128009'))
+    if: github.ref == 'refs/heads/main' && inputs.approved
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -96,7 +93,7 @@ jobs:
         id: package
         shell: bash
         env:
-          APPROVED_SHA256: ${{ github.event_name == 'push' && '4b6bca128009f063f3c8912d3869226a53b0c2d34ac1ede377d6c8443222f129' || inputs.sha256 }}
+          APPROVED_SHA256: ${{ inputs.sha256 }}
         run: |
           python - <<'PY'
           import hashlib, json, os, pathlib, py_compile, re, subprocess, sys, zipfile
