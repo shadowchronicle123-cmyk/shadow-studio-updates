@@ -6,8 +6,8 @@ ShadowChronicles uses a stable narrator identity. Creator comparisons should use
 
 - Existing production CLI: `SHADOW_NARRATION_ENGINE=edge-neural python production_worker.py run ...` selects Edge neural voices, using `SHADOW_NEURAL_PRIMARY_VOICE` and `SHADOW_NEURAL_SECONDARY_VOICE` for stable identities. Network access is required; no paid API key is required.
 - Default `espeak` remains available for offline development/testing, **not approved for unattended upload**.
-- The separate `unattended_private_upload.py` entrypoint requires `SHADOW_APPROVED_VOICE_IDS` in the private worker environment, plus `SHADOW_NARRATION_REVIEW_APPROVED=1` in private worker configuration, a valid narration WAV, and a matching SHA-256 in the review manifest. A generated manifest cannot grant approval. This is a gate, not proof of human likeness.
-- The production worker now exports `renders/<day>/narration.wav` and `narration-review.json` with a SHA-256 digest. Both worker approval settings default to absent, so unattended upload remains blocked until explicitly reviewed and configured. The existing `private_upload.py` entrypoint is not protected by this new gate; production scheduling must invoke only the gated entrypoint.
+- The separate `unattended_private_upload.py` entrypoint requires `SHADOW_APPROVED_VOICE_IDS` in the private worker environment, plus `SHADOW_NARRATION_REVIEW_APPROVED=1` and `SHADOW_APPROVED_NARRATION_SHA256=<64-character digest>` in private worker configuration, a valid narration WAV, and a matching SHA-256 in the review manifest. A generated manifest cannot grant approval. This is a gate, not proof of human likeness.
+- The production worker now exports `renders/<day>/narration.wav` and `narration-review.json` with a SHA-256 digest. All worker approval settings default to absent, so unattended upload remains blocked until explicitly reviewed and configured. The existing `private_upload.py` entrypoint is not protected by this new gate; production scheduling must invoke only the gated entrypoint.
 - An approved voice must first be listened to by the owner. Do not set `SHADOW_APPROVED_VOICE_IDS` based on automated tests alone.
 
 ## Acceptance criteria
@@ -19,3 +19,7 @@ ShadowChronicles uses a stable narrator identity. Creator comparisons should use
 5. Run a real private-only upload with owner consent, verify the exact channel and private visibility, and only then consider scheduling.
 
 Cloud tests are offline and cannot establish naturalness or successful Google authorization.
+
+## Per-video approval
+
+For each video, listen to the exported clean `narration.wav`, review the finished MP4, then set `SHADOW_APPROVED_NARRATION_SHA256` to that WAV's SHA-256 in the private worker environment. A voice allowlist alone is not enough. Do not place owner approval settings in the generated `narration-review.json`. The owner must repeat this approval for each new audio track; this is **not** yet a fully hands-off daily workflow. The exact-video MP4 fingerprint is still checked by the existing private upload worker, but a separate durable approval ledger tying both fingerprints to the same reviewed job remains future work.
