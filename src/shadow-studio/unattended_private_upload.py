@@ -3,6 +3,7 @@
 Not scheduled or deployed. Existing private_upload.py CLI remains manual/legacy.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,7 +19,8 @@ def verified_narration_report(root, day, manifest):
         raise ValueError("Narration review manifest must be an object")
     voice = manifest.get("voice_id")
     engine = manifest.get("engine")
-    approved = manifest.get("listening_review_approved") is True
+    # Generated manifests are always unapproved; approval is worker-controlled.
+    approved = os.getenv("SHADOW_NARRATION_REVIEW_APPROVED") == "1"
     # The render manifest is producer-controlled. Only the owner-controlled
     # worker allowlist may authorize a voice for unattended uploading.
     allowlist = {value.strip() for value in os.getenv("SHADOW_APPROVED_VOICE_IDS", "").split(",") if value.strip()}
@@ -34,6 +36,12 @@ def verified_narration_report(root, day, manifest):
     path = (root / expected).resolve()
     if not path.is_relative_to(root) or path.is_symlink():
         raise ValueError("Invalid narration audio location")
+    expected_digest = manifest.get("narration_sha256")
+    if not isinstance(expected_digest, str) or len(expected_digest) != 64:
+        raise ValueError("Missing narration SHA-256")
+    actual_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if actual_digest != expected_digest:
+        raise ValueError("Narration WAV differs from its verified export manifest")
     report = inspect_wav(path)
     decision = check_unattended_narration(
         engine=engine, voice_id=voice, review_approved=approved, audio_report=report)
