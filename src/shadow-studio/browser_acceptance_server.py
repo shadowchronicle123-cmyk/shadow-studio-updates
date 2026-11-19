@@ -28,6 +28,7 @@ if __name__=='__main__':
     app.OUT=root/'outputs';app.OUT.mkdir()
     app.UPLOADS=root/'uploads';app.UPLOADS.mkdir()
     studio_tools.PROJECTS=root/'projects';studio_tools.PROJECTS.mkdir()
+    app.CLIPS=root/'clips';app.CLIPS.mkdir()
     cloud_handoff.OUT=app.OUT
     integration_bridge.OUTPUTS=app.OUT
     integration_bridge.DRAFT_DIR=root/'publishing_drafts';integration_bridge.DRAFT_DIR.mkdir()

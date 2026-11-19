@@ -27,7 +27,7 @@ def main():
                         '-c:v','libx264','-c:a','aac',str(fixture)],check=True)
         request = {**item,'background_name':fixture.name,'start_seconds':0,'end_seconds':3.5,'anchor':'right'}
         request.pop('file')
-        with patch.multiple(app,UPLOADS=media,ROOT=root,CLIPS=previews):
+        with patch.multiple(app,UPLOADS=media,CLIPS=previews), patch.object(app.studio_tools,'PROJECTS',root/'projects'):
             client=TestClient(app.app)
             rejected=client.post('/api/streamer-clips/preview',json={**request,'license_scope':'repost'})
             assert rejected.status_code==422
