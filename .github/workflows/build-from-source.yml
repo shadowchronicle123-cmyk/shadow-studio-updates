@@ -72,6 +72,7 @@ jobs:
           python production_smoke_test.py
           python audio_mix_test.py
           python integration_acceptance_v027.py
+          python batch_render_test.py
       - name: Test, package, and verify release
         id: package
         shell: bash

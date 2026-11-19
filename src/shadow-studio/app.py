@@ -89,6 +89,7 @@ def library():
             item=json.loads(path.read_text(encoding='utf-8'))
             if not re.fullmatch('[0-9a-f]{12}',item['id']):continue
             item['video_url']='/api/video/'+item['id']
+            item['captions_url']='/api/subtitles/'+item['id'] if (path.parent/'captions.srt').is_file() else None
             videos.append(item)
         except (ValueError,KeyError,OSError):continue
     videos.sort(key=lambda x:x.get('created_at',''),reverse=True)
@@ -318,10 +319,8 @@ class StoryRequest(BaseModel):
     style:str='messages'
     target:int=45
 
-class RenderRequest(BaseModel):
-    story:dict
+class RenderOptions(BaseModel):
     style:str='messages'
-    background_name:str|None=None
     voice:str="en-US-AriaNeural"
     voice_rate:int=Field(default=0,ge=-30,le=30)
     second_voice:str|None=None
@@ -333,6 +332,11 @@ class RenderRequest(BaseModel):
     voice_volume:int=Field(default=100,ge=25,le=150)
     music_volume:int=Field(default=22,ge=0,le=100)
     target_seconds:Literal[30, 45, 60]|None=None
+
+class RenderRequest(RenderOptions):
+    story: dict
+    background_name: str | None = None
+
 
 def safe_style(s):
     if s not in ('messages','reddit'):raise HTTPException(400,'Choose messages or reddit style')
@@ -642,27 +646,11 @@ def layout_preview(req: LayoutPreviewRequest):
     return Response(image, media_type='image/png', headers={'Cache-Control': 'no-store'})
 
 
-@app.post('/api/render')
-def render(req:RenderRequest):
+def render_settings(req):
     safe_style(req.style)
     if req.resolution not in ('720p','1080p'): raise HTTPException(400,'Choose 720p or 1080p')
     if not valid_voice(req.voice):raise HTTPException(400,'Invalid voice')
     if req.second_voice and not valid_voice(req.second_voice):raise HTTPException(400,'Invalid second voice')
-    story = clean_render_story(req.story)
-    title, clean = story['title'], story['lines']
-    background=None
-    if req.background_name and req.gameplay_id:raise HTTPException(400,'Choose a gameplay library clip or a one-time upload, not both')
-    selected_gameplay=None
-    if req.gameplay_id:
-        try:
-            if req.gameplay_id != 'auto' or GAMEPLAY.list_clips():
-                selected_gameplay=GAMEPLAY.pick(req.gameplay_id)
-                background=selected_gameplay['path']
-        except ValueError as exc:raise HTTPException(400,str(exc))
-    if req.background_name:
-        if not re.fullmatch(r'background_[0-9a-f]{12}\.(mp4|mov|mkv|webm)',req.background_name):raise HTTPException(400,'Invalid background')
-        background=UPLOADS/req.background_name
-        if not background.is_file():raise HTTPException(404,'Background not found')
     music = None
     if req.music_name:
         if not MUSIC_FILENAME.fullmatch(req.music_name):
@@ -670,6 +658,37 @@ def render(req:RenderRequest):
         music = UPLOADS / req.music_name
         if not music.is_file():
             raise HTTPException(404, 'Music track not found')
+    return {
+        'style': req.style, 'voice': req.voice, 'second_voice': req.second_voice,
+        'voice_rate': req.voice_rate, 'resolution': req.resolution, 'pacing': req.pacing,
+        'captions': req.captions, 'music': music, 'voice_volume': req.voice_volume,
+        'music_volume': req.music_volume, 'target_seconds': req.target_seconds,
+    }
+
+
+def pick_gameplay(gameplay_id):
+    if not gameplay_id or (gameplay_id == 'auto' and not GAMEPLAY.list_clips()):
+        return None
+    try:
+        return GAMEPLAY.pick(gameplay_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post('/api/render')
+def render(req:RenderRequest):
+    settings = render_settings(req)
+    story = clean_render_story(req.story)
+    title, clean = story['title'], story['lines']
+    background=None
+    if req.background_name and req.gameplay_id:raise HTTPException(400,'Choose a gameplay library clip or a one-time upload, not both')
+    selected_gameplay = pick_gameplay(req.gameplay_id)
+    if selected_gameplay:
+        background = selected_gameplay['path']
+    if req.background_name:
+        if not re.fullmatch(r'background_[0-9a-f]{12}\.(mp4|mov|mkv|webm)',req.background_name):raise HTTPException(400,'Invalid background')
+        background=UPLOADS/req.background_name
+        if not background.is_file():raise HTTPException(404,'Background not found')
     with lock:
         if active['id'] and jobs.get(active['id'],{}).get('state')=='running':raise HTTPException(409,'A video is already rendering')
         jobid=uuid.uuid4().hex[:12]
@@ -679,7 +698,9 @@ def render(req:RenderRequest):
         def callback(p,msg):
             with lock:jobs[jobid].update(percent=p,message=msg)
         try:
-            result=generate({'title':title,'lines':clean},OUT/jobid,style=req.style,background=background,progress=callback,voice=req.voice,second_voice=req.second_voice,voice_rate=req.voice_rate,resolution=req.resolution,gameplay_start=selected_gameplay['cursor'] if selected_gameplay else 0,pacing=req.pacing,captions=req.captions,music=music,voice_volume=req.voice_volume,music_volume=req.music_volume,target_seconds=req.target_seconds)
+            result = generate(story, OUT/jobid, background=background, progress=callback,
+                              gameplay_start=selected_gameplay['cursor'] if selected_gameplay else 0,
+                              **settings)
             callback(96, 'Verifying finished video and audio')
             validate_rendered_video(result, captions_required=req.captions)
             archive_video(jobid,title,jobs[jobid]['description'],result['duration'],req.style,req.resolution,req.voice)
@@ -762,105 +783,108 @@ def project_get(projectid:str):
 def all_jobs():
     with lock:return {'jobs':sorted((dict(x) for x in jobs.values()),key=lambda d:d['id'],reverse=True)[:50]}
 
-class BatchRequest(BaseModel):
-    ideas:list[str]=Field(min_length=1,max_length=8)
-    style:str='messages'
-    target:int=45
-    voice:str='en-US-AriaNeural'
-    voice_rate:int=Field(default=0,ge=-30,le=30)
-    resolution:str='720p'
-    gameplay_id:str|None=None
+class BatchRequest(RenderOptions):
+    ideas: list[str] = Field(min_length=1, max_length=8)
+    target: int = 45
+    ending: Literal["resolved", "question"] = "resolved"
+
+
+class ReadyBatchRequest(RenderOptions):
+    story_indices: list[int] = Field(default_factory=lambda: [0, 1, 2], min_length=1, max_length=3)
+
+
+class RandomBatchRequest(RenderOptions):
+    count: int = Field(default=3, ge=1, le=8)
+    genre: Literal["random", "horror", "drama", "revenge", "mystery", "comedy"] = "random"
+    target: int = 45
+    ending: Literal["resolved", "question"] = "resolved"
+
+
+def start_batch(req, values, build_story, title):
+    settings = render_settings(req)
+    if req.gameplay_id and req.gameplay_id != 'auto':
+        pick_gameplay(req.gameplay_id)
+    with lock:
+        if active['id'] and jobs.get(active['id'], {}).get('state') == 'running':
+            raise HTTPException(409, 'A render is already running')
+        batch_id = uuid.uuid4().hex[:12]
+        active['id'] = batch_id
+        jobs[batch_id] = {'id': batch_id, 'state': 'running', 'percent': 1,
+                          'message': 'Preparing batch', 'title': title, 'video_ids': []}
+
+    def work():
+        previous_title = ''
+        job_id = None
+        try:
+            for index, value in enumerate(values):
+                story = build_story(value, previous_title)
+                previous_title = story['title']
+                description = metadata(story)['description']
+                job_id = uuid.uuid4().hex[:12]
+                with lock:
+                    jobs[job_id] = {'id': job_id, 'state': 'running', 'percent': 0,
+                                    'message': 'Starting narration', 'title': story['title'],
+                                    'description': description}
+                    jobs[batch_id].update(message=f'Rendering {index + 1} of {len(values)}',
+                                          percent=round(index / len(values) * 100))
+
+                def progress(percent, message):
+                    with lock:
+                        jobs[job_id].update(percent=percent, message=message)
+
+                clip = pick_gameplay(req.gameplay_id)
+                result = generate(story, OUT/job_id, progress=progress,
+                                  background=clip['path'] if clip else None,
+                                  gameplay_start=clip['cursor'] if clip else 0, **settings)
+                progress(96, 'Verifying finished video and audio')
+                validate_rendered_video(result, captions_required=req.captions)
+                archive_video(job_id, story['title'], description, result['duration'],
+                              req.style, req.resolution, req.voice)
+                if clip:
+                    GAMEPLAY.mark_used(clip['id'], result['duration'])
+                with lock:
+                    jobs[job_id].update(state='complete', percent=100, message='Ready for review',
+                                        duration=result['duration'], video_url='/api/video/'+job_id)
+                    jobs[batch_id]['video_ids'] = [*jobs[batch_id]['video_ids'], job_id]
+            with lock:
+                jobs[batch_id].update(state='complete', percent=100,
+                                      message=f'{len(values)} Shorts ready for review')
+        except Exception as exc:
+            message = str(exc.detail if isinstance(exc, HTTPException) else exc)[-600:]
+            with lock:
+                if job_id and jobs[job_id]['state'] == 'running':
+                    jobs[job_id].update(state='failed', message=message)
+                jobs[batch_id].update(state='failed', message=message)
+        finally:
+            with lock:
+                if active['id'] == batch_id:
+                    active['id'] = None
+    threading.Thread(target=work, daemon=True).start()
+    return {'id': batch_id, 'count': len(values)}
+
 
 @app.post('/api/batch')
-def batch_render(req:BatchRequest):
-    safe_style(req.style)
-    if not valid_voice(req.voice) or req.resolution not in ('720p','1080p'):
-        raise HTTPException(400,'Invalid voice or resolution')
-    with lock:
-        if active['id'] and jobs.get(active['id'],{}).get('state') in ('running','queued'):
-            raise HTTPException(409,'A render is already running')
-        batchid=uuid.uuid4().hex[:12]
-        active['id']=batchid
-        jobs[batchid]={'id':batchid,'state':'running','percent':1,'message':'Preparing batch','title':'Batch render'}
-    def work():
-        ids=[]
-        try:
-            for n,idea in enumerate(req.ideas):
-                story=make_story(idea,req.style,req.target)
-                jobid=uuid.uuid4().hex[:12]
-                with lock:
-                    jobs[jobid]={'id':jobid,'state':'running','percent':0,'message':'Preparing video','title':story['title'],'description':metadata(story)['description']}
-                    jobs[batchid].update(message=f'Rendering {n+1} of {len(req.ideas)}',percent=round(n/len(req.ideas)*100))
-                def progress(p,m):
-                    with lock:jobs[jobid].update(percent=p,message=m)
-                clip=GAMEPLAY.pick(req.gameplay_id) if req.gameplay_id else None
-                result=generate(story,OUT/jobid,style=req.style,voice=req.voice,voice_rate=req.voice_rate,resolution=req.resolution,progress=progress,background=clip['path'] if clip else None,gameplay_start=clip['cursor'] if clip else 0)
-                validate_rendered_video(result)
-                if clip:GAMEPLAY.mark_used(clip['id'],result['duration'])
-                archive_video(jobid,story['title'],jobs[jobid]['description'],result['duration'],req.style,req.resolution,req.voice)
-                with lock:jobs[jobid].update(state='complete',percent=100,message='Ready',duration=result['duration'],video_url='/api/video/'+jobid)
-                ids.append(jobid)
-            with lock:jobs[batchid].update(state='complete',percent=100,message=f'{len(ids)} videos ready',video_ids=ids)
-        except Exception as e:
-            with lock:
-                if 'jobid' in locals() and jobs.get(jobid,{}).get('state')=='running':
-                    jobs[jobid].update(state='failed',message=str(e)[-400:])
-                jobs[batchid].update(state='failed',message=str(e)[-400:],video_ids=ids)
-        finally:
-            with lock:active['id']=None
-    threading.Thread(target=work,daemon=True).start()
-    return {'id':batchid}
+def batch_render(req: BatchRequest):
+    ideas = [idea.strip() for idea in req.ideas]
+    if any(not 3 <= len(idea) <= 350 for idea in ideas):
+        raise HTTPException(400, 'Each story idea must have 3 to 350 characters')
+    return start_batch(req, ideas, lambda idea, _: make_story(idea, req.style, req.target, req.ending), 'Idea batch')
 
-# Curated-story batch: no template substitution; renders the exact original scripts.
-class ReadyBatchRequest(BaseModel):
-    story_indices: list[int] = Field(default_factory=lambda:[0,1,2],min_length=1,max_length=3)
-    voice: str='en-US-AriaNeural'
-    voice_rate: int=Field(default=0,ge=-30,le=30)
-    resolution: str='720p'
-    style: str='messages'
-    gameplay_id: str|None=None
 
 @app.post('/api/batch-ready')
-def batch_ready(req:ReadyBatchRequest):
-    safe_style(req.style)
-    if not valid_voice(req.voice) or req.resolution not in ('720p','1080p'):
-        raise HTTPException(400,'Invalid voice or resolution')
-    if len(set(req.story_indices))!=len(req.story_indices) or any(i<0 or i>=len(STARTER_STORIES) for i in req.story_indices):
-        raise HTTPException(400,'Choose distinct starter stories')
-    with lock:
-        if active['id'] and jobs.get(active['id'],{}).get('state') in ('running','queued'):
-            raise HTTPException(409,'A render is already running')
-        batchid=uuid.uuid4().hex[:12]
-        active['id']=batchid
-        jobs[batchid]={'id':batchid,'state':'running','percent':1,'message':'Preparing three original stories','title':'Ready stories batch'}
-    def work():
-        completed=[]
-        try:
-            for n,idx in enumerate(req.story_indices):
-                source=STARTER_STORIES[idx]
-                story={'title':source['title'],'lines':[dict(x) for x in source['lines']]}
-                jobid=uuid.uuid4().hex[:12]
-                with lock:
-                    jobs[jobid]={'id':jobid,'state':'running','percent':0,'message':'Starting narration','title':story['title'],'description':metadata(story)['description']}
-                    jobs[batchid].update(message=f'Rendering story {n+1} of {len(req.story_indices)}',percent=round(n/len(req.story_indices)*100))
-                def progress(p,m):
-                    with lock:jobs[jobid].update(percent=p,message=m)
-                gameplay=GAMEPLAY.pick(req.gameplay_id) if req.gameplay_id else None
-                result=generate(story,OUT/jobid,style=req.style,voice=req.voice,voice_rate=req.voice_rate,resolution=req.resolution,progress=progress,background=gameplay['path'] if gameplay else None,gameplay_start=gameplay['cursor'] if gameplay else 0)
-                validate_rendered_video(result)
-                if gameplay:GAMEPLAY.mark_used(gameplay['id'],result['duration'])
-                archive_video(jobid,story['title'],jobs[jobid]['description'],result['duration'],req.style,req.resolution,req.voice)
-                with lock:jobs[jobid].update(state='complete',percent=100,message='Ready for review',duration=result['duration'],video_url='/api/video/'+jobid)
-                completed.append(jobid)
-            with lock:jobs[batchid].update(state='complete',percent=100,message=f'{len(completed)} original Shorts ready for review',video_ids=completed)
-        except Exception as e:
-            with lock:
-                if 'jobid' in locals() and jobs.get(jobid,{}).get('state')=='running':jobs[jobid].update(state='failed',message=str(e)[-450:])
-                jobs[batchid].update(state='failed',message=str(e)[-450:],video_ids=completed)
-        finally:
-            with lock:active['id']=None
-    threading.Thread(target=work,daemon=True).start()
-    return {'id':batchid,'count':len(req.story_indices)}
+def batch_ready(req: ReadyBatchRequest):
+    indices = req.story_indices
+    if len(set(indices)) != len(indices) or any(not 0 <= index < len(STARTER_STORIES) for index in indices):
+        raise HTTPException(400, 'Choose distinct starter stories')
+    return start_batch(req, indices, lambda index, _: STARTER_STORIES[index], 'Ready stories batch')
+
+
+@app.post('/api/batch-random')
+def batch_random(req: RandomBatchRequest):
+    return start_batch(req, range(req.count),
+                       lambda _, previous: random_story(req.genre, req.target, req.ending, previous),
+                       'Random stories batch')
+
 
 @app.get('/api/metadata/{jobid}')
 def job_metadata(jobid:str):
@@ -1235,7 +1259,7 @@ button:focus-visible,a:focus-visible{outline:2px solid #ff9ab5!important;outline
 .ollama-rewrite{display:none}
 .ollama-available .ollama-rewrite{display:inline-block}
 </style></head><body>
-<header><div class="tag">SHADOWCHRONICLES • PRIVATE WORKSPACE • v0.38</div><div class="brandrow"><img src="/brand-logo" alt="ShadowChronicles logo" class="brandmark"><div><h1>SHADOW <span>STUDIO</span></h1><p class="brandtag">THE CONTENT ENGINE</p></div></div><p>Your creative command center. Draft, produce, review and prepare Shorts — all in one place.</p><nav aria-label="Workspace sections"><button type="button" class="tab active" data-view="create" onclick="switchView('create')">✦ &nbsp; Create</button><button type="button" class="tab" data-view="library" onclick="switchView('library')">▣ &nbsp; Review library</button><button type="button" class="tab" data-view="automation" onclick="switchView('automation')">◷ &nbsp; Automation</button><button type="button" class="tab" data-view="tools" onclick="switchView('tools')">◈ &nbsp; Tools & Editor</button><button type="button" class="tab" data-view="assistant" onclick="switchView('assistant')">↗ &nbsp; Publishing</button></nav></header><main data-view-panel="create"><section class="launch-hero" aria-label="Production overview"><div><span class="eyebrow">SHADOWCHRONICLES / CREATOR DESK</span><h2>Make something<br><span style="color:#fc6993">worth watching.</span></h2><p>Everything you need to produce your next short-form story: original scripts, natural voices, your gameplay, and a controlled review-to-publishing workflow.</p></div><div class="hero-actions"><button type="button" onclick="document.getElementById('idea').focus()">+ New story</button><button type="button" class="subtle" onclick="switchView('library')">Review videos →</button></div></section><div class="launch-metrics"><div class="metric"><span>RENDERED SHORTS</span><strong id="metricRendered">—</strong><small>Stored on this computer</small></div><div class="metric"><span>APPROVED</span><strong id="metricApproved">—</strong><small>Passed review checks</small></div><div class="metric"><span>AWAITING REVIEW</span><strong id="metricPending">—</strong><small>Ready for your decision</small></div></div><section class="launch-checks" id="launchChecks"><h3>Production system check</h3><div id="launchCheckItems" aria-live="polite"></div><p class="muted" id="launchCheckNote"></p><button class="subtle" onclick="checkProductionReadiness()">↻ Run checks again</button></section><section class="panel" id="create-panel"><span class="eyebrow">01 / STORY WORKSHOP</span><h2>Create your story</h2><div class="help"><strong>Quick start — three ready-to-edit originals</strong><p class="muted">Want to upload multiple Shorts tonight? Load a complete story below, preview a neural voice, then render.</p><div id="starterList" class="row"></div></div><label for="idea">Story idea</label><textarea id="idea">My friend sent me a screenshot that changed everything about my relationship</textarea><label for="style">Video style</label><select id="style"><option value="messages">Animated text message story</option><option value="reddit">Reddit-style story</option></select><label for="target">Target story length (approximate)</label><select id="target"><option value="30">30 seconds</option><option value="45" selected>45 seconds</option><option value="60">60 seconds</option></select><label for="genre">Genre for random stories</label><select id="genre"><option value="random">Random</option><option value="horror">Horror</option><option value="drama">Drama</option><option value="revenge">Revenge</option><option value="mystery">Mystery</option><option value="comedy">Comedy</option></select><label for="ending">Generated story ending</label><select id="ending"><option value="resolved">Story resolution</option><option value="question">Resolution + audience question</option></select><div class="row"><button onclick="createStory()" id="storyBtn">Generate from idea</button><button class="subtle" onclick="createStory(true)" id="randomStoryBtn">Custom Generate</button><button onclick="quickGenerate()" id="quickBtn">Quick Generate a video</button></div><p class="muted">Random stories remix original offline outlines. Generate from idea uses local Ollama when configured, with a template fallback. Actual video length depends on the voice and pauses.</p><div id="editor"><h2>2. Review & edit script</h2><label for="title">Video title</label><input id="title" maxlength="95"><div id="lines"></div><button class="subtle" onclick="addLine()">+ Add dialogue line</button><div class="row"><button class="subtle" onclick="saveProject()">Save project</button><button class="subtle" onclick="refreshProjects()">Refresh saved projects</button></div><label>Saved projects</label><select id="projects" onchange="loadProject()"><option value="">Choose a project...</option></select></div></section><section class="panel" id="production-panel"><span class="eyebrow">02 / PRODUCTION SETTINGS</span><h2>Produce your video</h2><label for="voice">Narrator voice</label><select id="voice"><option value="en-US-AriaNeural">Aria — conversational woman (US)</option><option value="en-US-JennyNeural">Jenny — friendly woman (US)</option><option value="en-US-MichelleNeural">Michelle — warm woman (US)</option><option value="en-US-GuyNeural">Guy — storyteller man (US)</option><option value="en-US-DavisNeural">Davis — deeper man (US)</option><option value="en-US-ChristopherNeural">Christopher — announcer man (US)</option><option value="en-GB-SoniaNeural">Sonia — woman (British)</option><option value="en-GB-RyanNeural">Ryan — man (British)</option><option value="windows-default">Windows voice — offline fallback</option></select><p class="muted">For free tests, select Aria, Jenny, or Michelle and preview before rendering. Matilda is your preferred vidIQ voice, but does not automatically transfer to this local app. An authorized ElevenLabs API key is required for premium voices; those requests may be billed separately.</p><label for="secondVoice">Second character voice</label><select id="secondVoice"><option value="en-US-GuyNeural">Guy — storyteller man (US)</option><option value="en-US-DavisNeural">Davis — deeper man (US)</option><option value="en-US-JennyNeural">Jenny — friendly woman (US)</option><option value="en-US-AriaNeural">Aria — conversational woman (US)</option></select><p class="muted">The first speaker uses the main voice; every other speaker uses this second voice. Choose the same voice only if you want identical narration.</p><label for="voiceRate">Speaking speed</label><select id="voiceRate"><option value="-15">Slower</option><option value="0" selected>Normal</option><option value="10">A little faster</option><option value="20">Fast</option></select><div class="row"><button class="subtle" id="previewVoiceBtn" onclick="previewVoice()">▶ Preview main voice</button><button class="subtle" onclick="previewVoice(true)">▶ Preview second voice</button></div><audio id="voicePreview" controls preload="none" style="display:none;width:100%;margin-top:12px"></audio><div class="voice-note" id="voiceAvailability">Voice studio: loading...</div><p class="muted">Natural voices are the default and require internet. If a natural voice is unavailable, the render stops with an error instead of silently switching to a robotic voice. Always preview before rendering.</p><label class="checkboxline"><input type="checkbox" id="fitDuration" checked>Fit to target length by adjusting automatic gaps</label><label for="pacing">Dialogue pacing</label><select id="pacing"><option value="snappy">Snappy</option><option value="normal" selected>Normal</option><option value="deliberate">Deliberate</option></select><label class="checkboxline"><input type="checkbox" id="exportCaptions" checked>Export separate timed captions (.srt)</label><details class="help"><summary>Music and sound effects</summary><label for="musicTrack">Background music</label><select id="musicTrack"><option value="">No music</option></select><label for="musicFile">Import licensed audio</label><input id="musicFile" type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac"><label class="checkboxline"><input type="checkbox" id="musicLicensed">I have permission to use this track in my videos</label><button type="button" class="subtle" onclick="importMusic()">Import track</button><p class="muted" id="musicStatus" role="status"></p><label for="voiceVolume">Voice level (%)</label><input id="voiceVolume" type="number" min="25" max="150" value="100"><label for="musicVolume">Music level (%)</label><input id="musicVolume" type="number" min="0" max="100" value="22"><p class="muted">Music lowers during speech. Add a message sound, impact, or transition to any dialogue line.</p></details><label for="resolution">Export resolution (30 FPS)</label><select id="resolution"><option value="720p" selected>720 × 1280 — faster</option><option value="1080p">1080 × 1920 — sharper export</option></select><p class="muted">Current designs are drawn at 540 × 960 and upscaled, so 1080p does not add source detail.</p><label for="gameplayChoice">Gameplay library (only clips you own or may use)</label><select id="gameplayChoice"><option value="">No saved gameplay</option><option value="auto">Automatic — rotate saved clips</option></select><div class="row"><button class="subtle" onclick="refreshGameplay()">Refresh gameplay library</button></div><label for="gameplayFile">Add gameplay to library</label><input id="gameplayFile" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska"><label for="gameplayTag">Game or category</label><input id="gameplayTag" placeholder="Minecraft parkour, GTA driving, etc."><div class="row"><button class="subtle" onclick="saveGameplay()" id="gameplaySave">Save gameplay</button></div><p class="muted" id="gameplayStatus">Saved footage is kept on this PC and reused across Shorts. Dialogue appears above gameplay, which fills the lower 58% of the video.</p><label for="background">Or upload gameplay for just this video</label><input id="background" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska"><p class="muted">Leave both blank for the original dark story layout. Saved footage takes priority over the one-time upload.</p><div class="row"><button onclick="showLayoutPreview(0)" id="layoutBtn" type="button" class="subtle">Preview layout</button><button onclick="renderVideo()" id="renderBtn" disabled>Render MP4</button></div><section class="help layout-preview" id="layoutPreview" hidden><div class="row"><button onclick="showLayoutPreview(-1)" id="layoutPrevious" type="button" class="subtle">Previous line</button><button onclick="showLayoutPreview(1)" id="layoutNext" type="button" class="subtle">Next line</button></div><p id="layoutStatus" class="muted" role="status"></p><img id="layoutImage" alt="Vertical dialogue layout preview" hidden></section><div id="status">Generate a script to get started.</div><progress id="progress" max="100" value="0" style="display:none"></progress><div id="videoSection"><h2>4. Preview & download</h2><video id="preview" controls playsinline></video><details id="previewCaptionReview" class="help caption-review" hidden><summary>Review caption timing</summary><div></div></details><div class="row"><a class="button" id="download" download>Download MP4</a><a class="button subtle" id="downloadCaptions" download>Download timed captions</a></div><label for="description">YouTube description (copy after reviewing)</label><textarea id="description" rows="7" readonly></textarea><div class="row"><button class="subtle" onclick="navigator.clipboard.writeText(document.getElementById('description').value)">Copy description</button></div><div class="help muted">Publishing requires separate approval. Inspect the finished video and upload it to YouTube Studio, or use your connected vidIQ workflow after approval.</div></div><div class="help muted" id="health">Checking FFmpeg...</div></section></main><section class="panel" id="integration-center" data-view-panel="assistant" hidden style="max-width:1000px;margin:24px auto"><span class="eyebrow">CONNECTIVITY / PRIVATE BETA</span><h2>Integration health center</h2><p class="muted">See which tools are configured, then run a read-only connection test. No keys are shown, no credits are used, no files are sent and nothing gets published. A green connection does not guarantee successful generation.</p><div class="row"><button type="button" class="subtle" onclick="refreshIntegrationStatus(false)">Refresh setup</button><button type="button" onclick="refreshIntegrationStatus(true)">Test provider connections</button></div><div id="integrationStatus" class="integration-health-grid" role="status" aria-live="polite">Checking available integrations…</div><section class="help" style="margin-top:18px"><h3>Connect ElevenLabs</h3><p class="muted">Use your own ElevenLabs API key. We verify it with ElevenLabs first, then store it only in the local .env file. Previewing or rendering premium narration may consume ElevenLabs credits.</p><label for="elevenKey">ElevenLabs API key</label><input id="elevenKey" type="password" autocomplete="off" placeholder="Paste your ElevenLabs API key"><button type="button" onclick="connectElevenLabs()">Connect ElevenLabs</button><div class="row"><select id="elevenVoices" aria-label="ElevenLabs voice"><option value="">Connect account to list voices</option></select><button type="button" class="subtle" onclick="saveElevenVoice()">Use selected voice</button></div><p id="elevenFeedback" class="muted">Not tested with your account yet.</p></section><section class="help" style="margin-top:18px"><h3>App Updates</h3><p class="muted">Check for verified updates without downloading a ZIP manually. Configure SHADOW_UPDATE_FEED once in .env; close the app and run update_windows.bat to install. Your work stays on this PC.</p><button type="button" class="subtle" onclick="checkShadowUpdates()">Check for updates</button><p id="shadowUpdateStatus" class="muted">Update source not yet checked.</p></section></section><section class="panel library-panel" id="library-panel" data-view-panel="library"><div class="section-head"><div><span class="eyebrow">YOUR WORKSPACE</span><h2>Review Queue & Video Library</h2><p class="muted">Review videos, approve the ones you want to publish, and download an upload kit containing MP4s and descriptions.</p></div><button class="subtle" onclick="refreshLibrary()">↻ Refresh library</button></div><div id="libraryEmpty" class="muted">Loading your completed videos…</div><div id="libraryGrid" class="library-grid"></div><div class="row"><a class="button" href="/api/publishing-kit" download>↓ Download approved upload kit</a></div><div id="libraryDetails" hidden><h3 id="libraryTitle"></h3><video id="libraryPlayer" controls playsinline preload="metadata"></video><details id="libraryCaptionReview" class="help caption-review" hidden><summary>Review caption timing</summary><div></div></details><label for="reviewState">Review decision</label><select id="reviewState"><option value="needs_review">Needs review</option><option value="needs_changes">Needs changes</option><option value="approved">Approved for upload kit</option></select><label for="reviewNotes">Review notes</label><textarea id="reviewNotes" rows="2" placeholder="Optional notes before publishing..."></textarea><div class="row"><button class="subtle" onclick="runQualityCheck()">Run video quality check</button><button id="saveReviewBtn" onclick="saveReview()">Save review decision</button></div><div class="help" id="qualityPanel" role="status">Before approving, run a technical check. A passing check does not replace watching the complete video.</div><p class="muted" id="reviewFeedback">Approval only adds the video to your upload kit. Nothing is sent to YouTube.</p><label for="libraryDescription">YouTube description</label><textarea id="libraryDescription" readonly rows="5"></textarea><div class="row"><a id="libraryDownload" class="button" download>Download video</a><a id="subtitleDownload" class="button subtle" download hidden>↓ Download captions (.srt)</a><a id="handoffDownload" class="button" download>↓ ChatGPT + vidIQ handoff ZIP</a><button class="subtle" id="cloudHandoffBtn" onclick="createCloudHandoff()">☁ Generate private video link</button><button class="subtle" onclick="navigator.clipboard.writeText(el('libraryDescription').value)">Copy description</button></div><div id="cloudHandoffResult" class="help muted" hidden></div></div></section><section class="panel" data-view-panel="tools" id="split-panel" style="max-width:860px;margin:24px auto" hidden>
+<header><div class="tag">SHADOWCHRONICLES • PRIVATE WORKSPACE • v0.39</div><div class="brandrow"><img src="/brand-logo" alt="ShadowChronicles logo" class="brandmark"><div><h1>SHADOW <span>STUDIO</span></h1><p class="brandtag">THE CONTENT ENGINE</p></div></div><p>Your creative command center. Draft, produce, review and prepare Shorts — all in one place.</p><nav aria-label="Workspace sections"><button type="button" class="tab active" data-view="create" onclick="switchView('create')">✦ &nbsp; Create</button><button type="button" class="tab" data-view="library" onclick="switchView('library')">▣ &nbsp; Review library</button><button type="button" class="tab" data-view="automation" onclick="switchView('automation')">◷ &nbsp; Automation</button><button type="button" class="tab" data-view="tools" onclick="switchView('tools')">◈ &nbsp; Tools & Editor</button><button type="button" class="tab" data-view="assistant" onclick="switchView('assistant')">↗ &nbsp; Publishing</button></nav></header><main data-view-panel="create"><section class="launch-hero" aria-label="Production overview"><div><span class="eyebrow">SHADOWCHRONICLES / CREATOR DESK</span><h2>Make something<br><span style="color:#fc6993">worth watching.</span></h2><p>Everything you need to produce your next short-form story: original scripts, natural voices, your gameplay, and a controlled review-to-publishing workflow.</p></div><div class="hero-actions"><button type="button" onclick="document.getElementById('idea').focus()">+ New story</button><button type="button" class="subtle" onclick="switchView('library')">Review videos →</button></div></section><div class="launch-metrics"><div class="metric"><span>RENDERED SHORTS</span><strong id="metricRendered">—</strong><small>Stored on this computer</small></div><div class="metric"><span>APPROVED</span><strong id="metricApproved">—</strong><small>Passed review checks</small></div><div class="metric"><span>AWAITING REVIEW</span><strong id="metricPending">—</strong><small>Ready for your decision</small></div></div><section class="launch-checks" id="launchChecks"><h3>Production system check</h3><div id="launchCheckItems" aria-live="polite"></div><p class="muted" id="launchCheckNote"></p><button class="subtle" onclick="checkProductionReadiness()">↻ Run checks again</button></section><section class="panel" id="create-panel"><span class="eyebrow">01 / STORY WORKSHOP</span><h2>Create your story</h2><div class="help"><strong>Quick start — three ready-to-edit originals</strong><p class="muted">Want to upload multiple Shorts tonight? Load a complete story below, preview a neural voice, then render.</p><div id="starterList" class="row"></div></div><label for="idea">Story idea</label><textarea id="idea">My friend sent me a screenshot that changed everything about my relationship</textarea><label for="style">Video style</label><select id="style"><option value="messages">Animated text message story</option><option value="reddit">Reddit-style story</option></select><label for="target">Target story length (approximate)</label><select id="target"><option value="30">30 seconds</option><option value="45" selected>45 seconds</option><option value="60">60 seconds</option></select><label for="genre">Genre for random stories</label><select id="genre"><option value="random">Random</option><option value="horror">Horror</option><option value="drama">Drama</option><option value="revenge">Revenge</option><option value="mystery">Mystery</option><option value="comedy">Comedy</option></select><label for="ending">Generated story ending</label><select id="ending"><option value="resolved">Story resolution</option><option value="question">Resolution + audience question</option></select><div class="row"><button onclick="createStory()" id="storyBtn">Generate from idea</button><button class="subtle" onclick="createStory(true)" id="randomStoryBtn">Custom Generate</button><button onclick="quickGenerate()" id="quickBtn">Quick Generate a video</button></div><p class="muted">Random stories remix original offline outlines. Generate from idea uses local Ollama when configured, with a template fallback. Actual video length depends on the voice and pauses.</p><div id="editor"><h2>2. Review & edit script</h2><label for="title">Video title</label><input id="title" maxlength="95"><div id="lines"></div><button class="subtle" onclick="addLine()">+ Add dialogue line</button><div class="row"><button class="subtle" onclick="saveProject()">Save project</button><button class="subtle" onclick="refreshProjects()">Refresh saved projects</button></div><label>Saved projects</label><select id="projects" onchange="loadProject()"><option value="">Choose a project...</option></select></div></section><section class="panel" id="production-panel"><span class="eyebrow">02 / PRODUCTION SETTINGS</span><h2>Produce your video</h2><label for="voice">Narrator voice</label><select id="voice"><option value="en-US-AriaNeural">Aria — conversational woman (US)</option><option value="en-US-JennyNeural">Jenny — friendly woman (US)</option><option value="en-US-MichelleNeural">Michelle — warm woman (US)</option><option value="en-US-GuyNeural">Guy — storyteller man (US)</option><option value="en-US-DavisNeural">Davis — deeper man (US)</option><option value="en-US-ChristopherNeural">Christopher — announcer man (US)</option><option value="en-GB-SoniaNeural">Sonia — woman (British)</option><option value="en-GB-RyanNeural">Ryan — man (British)</option><option value="windows-default">Windows voice — offline fallback</option></select><p class="muted">For free tests, select Aria, Jenny, or Michelle and preview before rendering. Matilda is your preferred vidIQ voice, but does not automatically transfer to this local app. An authorized ElevenLabs API key is required for premium voices; those requests may be billed separately.</p><label for="secondVoice">Second character voice</label><select id="secondVoice"><option value="en-US-GuyNeural">Guy — storyteller man (US)</option><option value="en-US-DavisNeural">Davis — deeper man (US)</option><option value="en-US-JennyNeural">Jenny — friendly woman (US)</option><option value="en-US-AriaNeural">Aria — conversational woman (US)</option></select><p class="muted">The first speaker uses the main voice; every other speaker uses this second voice. Choose the same voice only if you want identical narration.</p><label for="voiceRate">Speaking speed</label><select id="voiceRate"><option value="-15">Slower</option><option value="0" selected>Normal</option><option value="10">A little faster</option><option value="20">Fast</option></select><div class="row"><button class="subtle" id="previewVoiceBtn" onclick="previewVoice()">▶ Preview main voice</button><button class="subtle" onclick="previewVoice(true)">▶ Preview second voice</button></div><audio id="voicePreview" controls preload="none" style="display:none;width:100%;margin-top:12px"></audio><div class="voice-note" id="voiceAvailability">Voice studio: loading...</div><p class="muted">Natural voices are the default and require internet. If a natural voice is unavailable, the render stops with an error instead of silently switching to a robotic voice. Always preview before rendering.</p><label class="checkboxline"><input type="checkbox" id="fitDuration" checked>Fit to target length by adjusting automatic gaps</label><label for="pacing">Dialogue pacing</label><select id="pacing"><option value="snappy">Snappy</option><option value="normal" selected>Normal</option><option value="deliberate">Deliberate</option></select><label class="checkboxline"><input type="checkbox" id="exportCaptions" checked>Export separate timed captions (.srt)</label><details class="help"><summary>Music and sound effects</summary><label for="musicTrack">Background music</label><select id="musicTrack"><option value="">No music</option></select><label for="musicFile">Import licensed audio</label><input id="musicFile" type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac"><label class="checkboxline"><input type="checkbox" id="musicLicensed">I have permission to use this track in my videos</label><button type="button" class="subtle" onclick="importMusic()">Import track</button><p class="muted" id="musicStatus" role="status"></p><label for="voiceVolume">Voice level (%)</label><input id="voiceVolume" type="number" min="25" max="150" value="100"><label for="musicVolume">Music level (%)</label><input id="musicVolume" type="number" min="0" max="100" value="22"><p class="muted">Music lowers during speech. Add a message sound, impact, or transition to any dialogue line.</p></details><label for="resolution">Export resolution (30 FPS)</label><select id="resolution"><option value="720p" selected>720 × 1280 — faster</option><option value="1080p">1080 × 1920 — sharper export</option></select><p class="muted">Current designs are drawn at 540 × 960 and upscaled, so 1080p does not add source detail.</p><label for="gameplayChoice">Gameplay library (only clips you own or may use)</label><select id="gameplayChoice"><option value="">No saved gameplay</option><option value="auto">Automatic — rotate saved clips</option></select><div class="row"><button class="subtle" onclick="refreshGameplay()">Refresh gameplay library</button></div><label for="gameplayFile">Add gameplay to library</label><input id="gameplayFile" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska"><label for="gameplayTag">Game or category</label><input id="gameplayTag" placeholder="Minecraft parkour, GTA driving, etc."><div class="row"><button class="subtle" onclick="saveGameplay()" id="gameplaySave">Save gameplay</button></div><p class="muted" id="gameplayStatus">Saved footage is kept on this PC and reused across Shorts. Dialogue appears above gameplay, which fills the lower 58% of the video.</p><label for="background">Or upload gameplay for just this video</label><input id="background" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska"><p class="muted">Leave both blank for the original dark story layout. Saved footage takes priority over the one-time upload.</p><div class="row"><button onclick="showLayoutPreview(0)" id="layoutBtn" type="button" class="subtle">Preview layout</button><button onclick="renderVideo()" id="renderBtn" disabled>Render MP4</button></div><section class="help layout-preview" id="layoutPreview" hidden><div class="row"><button onclick="showLayoutPreview(-1)" id="layoutPrevious" type="button" class="subtle">Previous line</button><button onclick="showLayoutPreview(1)" id="layoutNext" type="button" class="subtle">Next line</button></div><p id="layoutStatus" class="muted" role="status"></p><img id="layoutImage" alt="Vertical dialogue layout preview" hidden></section><div id="status">Generate a script to get started.</div><progress id="progress" max="100" value="0" style="display:none"></progress><div id="videoSection"><h2>4. Preview & download</h2><video id="preview" controls playsinline></video><details id="previewCaptionReview" class="help caption-review" hidden><summary>Review caption timing</summary><div></div></details><div class="row"><a class="button" id="download" download>Download MP4</a><a class="button subtle" id="downloadCaptions" download>Download timed captions</a></div><label for="description">YouTube description (copy after reviewing)</label><textarea id="description" rows="7" readonly></textarea><div class="row"><button class="subtle" onclick="navigator.clipboard.writeText(document.getElementById('description').value)">Copy description</button></div><div class="help muted">Publishing requires separate approval. Inspect the finished video and upload it to YouTube Studio, or use your connected vidIQ workflow after approval.</div></div><div class="help muted" id="health">Checking FFmpeg...</div></section></main><section class="panel" id="integration-center" data-view-panel="assistant" hidden style="max-width:1000px;margin:24px auto"><span class="eyebrow">CONNECTIVITY / PRIVATE BETA</span><h2>Integration health center</h2><p class="muted">See which tools are configured, then run a read-only connection test. No keys are shown, no credits are used, no files are sent and nothing gets published. A green connection does not guarantee successful generation.</p><div class="row"><button type="button" class="subtle" onclick="refreshIntegrationStatus(false)">Refresh setup</button><button type="button" onclick="refreshIntegrationStatus(true)">Test provider connections</button></div><div id="integrationStatus" class="integration-health-grid" role="status" aria-live="polite">Checking available integrations…</div><section class="help" style="margin-top:18px"><h3>Connect ElevenLabs</h3><p class="muted">Use your own ElevenLabs API key. We verify it with ElevenLabs first, then store it only in the local .env file. Previewing or rendering premium narration may consume ElevenLabs credits.</p><label for="elevenKey">ElevenLabs API key</label><input id="elevenKey" type="password" autocomplete="off" placeholder="Paste your ElevenLabs API key"><button type="button" onclick="connectElevenLabs()">Connect ElevenLabs</button><div class="row"><select id="elevenVoices" aria-label="ElevenLabs voice"><option value="">Connect account to list voices</option></select><button type="button" class="subtle" onclick="saveElevenVoice()">Use selected voice</button></div><p id="elevenFeedback" class="muted">Not tested with your account yet.</p></section><section class="help" style="margin-top:18px"><h3>App Updates</h3><p class="muted">Check for verified updates without downloading a ZIP manually. Configure SHADOW_UPDATE_FEED once in .env; close the app and run update_windows.bat to install. Your work stays on this PC.</p><button type="button" class="subtle" onclick="checkShadowUpdates()">Check for updates</button><p id="shadowUpdateStatus" class="muted">Update source not yet checked.</p></section></section><section class="panel library-panel" id="library-panel" data-view-panel="library"><div class="section-head"><div><span class="eyebrow">YOUR WORKSPACE</span><h2>Review Queue & Video Library</h2><p class="muted">Review videos, approve the ones you want to publish, and download an upload kit containing MP4s and descriptions.</p></div><button class="subtle" onclick="refreshLibrary()">↻ Refresh library</button></div><div id="libraryEmpty" class="muted">Loading your completed videos…</div><div id="libraryGrid" class="library-grid"></div><div class="row"><a class="button" href="/api/publishing-kit" download>↓ Download approved upload kit</a></div><div id="libraryDetails" hidden><h3 id="libraryTitle"></h3><video id="libraryPlayer" controls playsinline preload="metadata"></video><details id="libraryCaptionReview" class="help caption-review" hidden><summary>Review caption timing</summary><div></div></details><label for="reviewState">Review decision</label><select id="reviewState"><option value="needs_review">Needs review</option><option value="needs_changes">Needs changes</option><option value="approved">Approved for upload kit</option></select><label for="reviewNotes">Review notes</label><textarea id="reviewNotes" rows="2" placeholder="Optional notes before publishing..."></textarea><div class="row"><button class="subtle" onclick="runQualityCheck()">Run video quality check</button><button id="saveReviewBtn" onclick="saveReview()">Save review decision</button></div><div class="help" id="qualityPanel" role="status">Before approving, run a technical check. A passing check does not replace watching the complete video.</div><p class="muted" id="reviewFeedback">Approval only adds the video to your upload kit. Nothing is sent to YouTube.</p><label for="libraryDescription">YouTube description</label><textarea id="libraryDescription" readonly rows="5"></textarea><div class="row"><a id="libraryDownload" class="button" download>Download video</a><a id="subtitleDownload" class="button subtle" download hidden>↓ Download captions (.srt)</a><a id="handoffDownload" class="button" download>↓ ChatGPT + vidIQ handoff ZIP</a><button class="subtle" id="cloudHandoffBtn" onclick="createCloudHandoff()">☁ Generate private video link</button><button class="subtle" onclick="navigator.clipboard.writeText(el('libraryDescription').value)">Copy description</button></div><div id="cloudHandoffResult" class="help muted" hidden></div></div></section><section class="panel" data-view-panel="tools" id="split-panel" style="max-width:860px;margin:24px auto" hidden>
 
 <div class="tool-intro"><span class="eyebrow">PRODUCTION SUITE / 04</span><h2>Cut. Caption. Create.</h2><p class="muted">A focused set of real tools for your own clips. Upload a source once per tool; every export remains on your computer. AI features that require extra engines are clearly labeled.</p></div>
 <div class="studio-tool-grid">
@@ -1263,7 +1287,7 @@ button:focus-visible,a:focus-visible{outline:2px solid #ff9ab5!important;outline
 <label for="rankSeconds">Seconds per ranked clip</label><select id="rankSeconds"><option value="3">3 seconds</option><option value="4" selected>4 seconds</option><option value="6">6 seconds</option><option value="8">8 seconds</option></select>
 <div class="row"><button id="rankButton" onclick="makeRanking()">Create ranked Short</button></div><p class="muted" id="rankStatus">Waiting for clips.</p>
 <div id="rankResult" hidden><video id="rankPlayer" controls playsinline preload="metadata"></video><div class="row"><a id="rankDownload" class="button" download>Download ranking MP4</a></div></div>
-</section><section class="panel" id="automation-panel" data-view-panel="automation" style="max-width:1100px;margin:0 auto 30px"><h2>5. Automation & Media Tools</h2><p class="muted">Batch-create up to 8 Shorts sequentially. Automatic gameplay rotation uses the saved library selection above. This uses your PC; neural narration requires an internet connection.</p><label>Batch story ideas — one idea per line</label><textarea id="batchIdeas" placeholder="My friend found a secret note...&#10;The wedding invitation had the wrong name..." rows="4"></textarea><div class="help"><strong>Tonight’s quick production: three complete original stories</strong><p class="muted">Uses the voice, style, export resolution and gameplay library selected in Create. Preview a neural voice first; this can take several minutes and may use paid voice credits.</p><button id="readyBatchBtn" onclick="startReadyBatch()">▶ Render all 3 ready stories</button></div><div class="row"><button onclick="startBatch()" id="batchBtn">Generate batch</button><button class="subtle" onclick="refreshJobs()">Refresh jobs</button></div><div id="batchStatus" class="muted"></div><div id="jobList"></div><hr style="border:0;border-top:1px solid #303b50;margin:26px 0"><h2 id="clipper-panel">6. Basic video clipper</h2><p class="muted">Trim a video you own or have permission to use. This is a manual clipper, not AI highlight detection.</p><label>Source video</label><input type="file" id="clipFile" accept="video/*"><label for="clipUrl">Or public YouTube / Twitch URL</label><input type="url" id="clipUrl" placeholder="https://clips.twitch.tv/..."><label class="muted"><input type="checkbox" id="clipRights" style="width:auto"> I have the right to use this footage</label><div class="row"><div><label>Start second</label><input type="number" id="clipStart" min="0" step="0.1" value="0"></div><div><label>End second</label><input type="number" id="clipEnd" min="0.1" step="0.1" value="30"></div></div><div class="row"><button onclick="createClip()" id="clipBtn">Make vertical clip</button></div><div id="clipStatus" class="muted"></div><div id="clipLink"></div><div class="help muted">Nothing is uploaded to YouTube automatically. Videos need your approval and a connected publishing integration.</div></section><section class="panel assist-panel" data-view-panel="assistant" id="assistant-panel" style="max-width:1100px;margin:0 auto 30px"><span class="eyebrow">OWNER APPROVAL</span><h2>ChatGPT + YouTube handoff</h2><p class="muted">Use ChatGPT to improve stories, write titles and descriptions, and prepare publishing drafts. With private storage configured, Shadow Studio can upload approved videos automatically and prepare a direct import link for ChatGPT + vidIQ. Final draft approval and publishing are always separate.</p><label for="assistTitle">Video title</label><input id="assistTitle" placeholder="Choose a finished video from Library, or enter a title"><label for="assistDesc">Description</label><textarea id="assistDesc" placeholder="Paste or edit the video description"></textarea><label for="assistNotes">What should ChatGPT help with?</label><select id="assistNotes"><option value="Review this video and improve its title, description, and hook">Review and optimize</option><option value="Prepare a YouTube Shorts publishing draft for ShadowChronicles and show it to me for approval">Prepare publishing draft</option><option value="Suggest improvements to the next three episodes">Plan follow-up stories</option></select><div class="row"><button onclick="copyAssistantRequest()">Copy request for ChatGPT</button><button class="subtle" onclick="switchView('library')">Choose video from Library</button></div><div class="help muted" id="assistStatus">To send a completed MP4 to ChatGPT, attach the downloaded file in your chat after copying the request. A separate read-only private MCP connector is included in v0.20. It must be configured and connected from ChatGPT on web; it does not send messages into this conversation automatically.</div><div class="help"><strong>New: video handoff to ChatGPT + vidIQ</strong><p>Open a completed video in Library, run its quality check, and mark it approved. Download its ChatGPT + vidIQ handoff ZIP, then attach the MP4 and paste the included request into this chat. ChatGPT can prepare a publishing draft; publishing still requires a separate approval.</p><p class="muted">Optional private link handoff: configure S3-compatible storage in .env, then approve a video and click Generate private video link. Or enable auto-upload on approval. No tokens are included in any exported package.</p></div><h3 style="margin-top:26px">Bring a ChatGPT story into Shadow Studio</h3><p class="muted">Ask ChatGPT to write a story as JSON using this format: <code>{"title":"...","lines":[{"speaker":"Me","text":"..."}]}</code>. Paste its response here, then import the editable dialogue into Create.</p><textarea id="assistantImport" placeholder='{"title":"My shocking story","lines":[{"speaker":"Me","text":"You won’t believe this..."}]}'></textarea><div class="row"><button class="subtle" onclick="importAssistantStory()">Import story JSON</button></div><h3 style="margin-top:26px">Publishing draft queue</h3><p class="muted">Select a finished video in Library, approve it after the quality check, then return here to stage its title and description. Nothing will upload to YouTube.</p><label for="draftVideoId">Approved video ID</label><input id="draftVideoId" placeholder="Choose a video in Library first" readonly><label for="draftPrivacy">Desired YouTube visibility</label><select id="draftPrivacy"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public — still a draft only</option></select><div class="row"><button onclick="stagePublishingDraft()">Save publishing draft</button><button class="subtle" onclick="refreshPublishingDrafts()">Refresh drafts</button></div><div class="help" id="draftFeedback">Drafts are stored locally; no platform account is connected.</div><div id="draftQueue" class="muted"></div><h3 style="margin-top:26px">Publishing safety</h3><p class="muted">Draft → Review → Explicit approval → Publish using your connected YouTube/vidIQ service. No auto-publication or stored YouTube credentials in this release.</p></section><script>
+</section><section class="panel" id="automation-panel" data-view-panel="automation" style="max-width:1100px;margin:0 auto 30px"><h2>5. Automation & Media Tools</h2><p class="muted">Queue up to eight Shorts with the production settings from Create. Finished videos go to Review Library.</p><label for="batchCount">Number of random stories</label><input type="number" id="batchCount" value="3" min="1" max="8"><button id="randomBatchBtn" onclick="startRandomBatch()" type="button">Queue random stories</button><label>Batch story ideas — one idea per line</label><textarea id="batchIdeas" placeholder="My friend found a secret note...&#10;The wedding invitation had the wrong name..." rows="4"></textarea><div class="help"><strong>Tonight’s quick production: three complete original stories</strong><p class="muted">Use three complete starter scripts with your current voices, gameplay, captions, pacing and music.</p><button id="readyBatchBtn" onclick="startReadyBatch()">▶ Render all 3 ready stories</button></div><div class="row"><button onclick="startBatch()" id="batchBtn">Generate batch</button><button class="subtle" onclick="refreshJobs()">Refresh jobs</button></div><div id="batchStatus" class="muted"></div><div id="jobList"></div><hr style="border:0;border-top:1px solid #303b50;margin:26px 0"><h2 id="clipper-panel">6. Basic video clipper</h2><p class="muted">Trim a video you own or have permission to use. This is a manual clipper, not AI highlight detection.</p><label>Source video</label><input type="file" id="clipFile" accept="video/*"><label for="clipUrl">Or public YouTube / Twitch URL</label><input type="url" id="clipUrl" placeholder="https://clips.twitch.tv/..."><label class="muted"><input type="checkbox" id="clipRights" style="width:auto"> I have the right to use this footage</label><div class="row"><div><label>Start second</label><input type="number" id="clipStart" min="0" step="0.1" value="0"></div><div><label>End second</label><input type="number" id="clipEnd" min="0.1" step="0.1" value="30"></div></div><div class="row"><button onclick="createClip()" id="clipBtn">Make vertical clip</button></div><div id="clipStatus" class="muted"></div><div id="clipLink"></div><div class="help muted">Nothing is uploaded to YouTube automatically. Videos need your approval and a connected publishing integration.</div></section><section class="panel assist-panel" data-view-panel="assistant" id="assistant-panel" style="max-width:1100px;margin:0 auto 30px"><span class="eyebrow">OWNER APPROVAL</span><h2>ChatGPT + YouTube handoff</h2><p class="muted">Use ChatGPT to improve stories, write titles and descriptions, and prepare publishing drafts. With private storage configured, Shadow Studio can upload approved videos automatically and prepare a direct import link for ChatGPT + vidIQ. Final draft approval and publishing are always separate.</p><label for="assistTitle">Video title</label><input id="assistTitle" placeholder="Choose a finished video from Library, or enter a title"><label for="assistDesc">Description</label><textarea id="assistDesc" placeholder="Paste or edit the video description"></textarea><label for="assistNotes">What should ChatGPT help with?</label><select id="assistNotes"><option value="Review this video and improve its title, description, and hook">Review and optimize</option><option value="Prepare a YouTube Shorts publishing draft for ShadowChronicles and show it to me for approval">Prepare publishing draft</option><option value="Suggest improvements to the next three episodes">Plan follow-up stories</option></select><div class="row"><button onclick="copyAssistantRequest()">Copy request for ChatGPT</button><button class="subtle" onclick="switchView('library')">Choose video from Library</button></div><div class="help muted" id="assistStatus">To send a completed MP4 to ChatGPT, attach the downloaded file in your chat after copying the request. A separate read-only private MCP connector is included in v0.20. It must be configured and connected from ChatGPT on web; it does not send messages into this conversation automatically.</div><div class="help"><strong>New: video handoff to ChatGPT + vidIQ</strong><p>Open a completed video in Library, run its quality check, and mark it approved. Download its ChatGPT + vidIQ handoff ZIP, then attach the MP4 and paste the included request into this chat. ChatGPT can prepare a publishing draft; publishing still requires a separate approval.</p><p class="muted">Optional private link handoff: configure S3-compatible storage in .env, then approve a video and click Generate private video link. Or enable auto-upload on approval. No tokens are included in any exported package.</p></div><h3 style="margin-top:26px">Bring a ChatGPT story into Shadow Studio</h3><p class="muted">Ask ChatGPT to write a story as JSON using this format: <code>{"title":"...","lines":[{"speaker":"Me","text":"..."}]}</code>. Paste its response here, then import the editable dialogue into Create.</p><textarea id="assistantImport" placeholder='{"title":"My shocking story","lines":[{"speaker":"Me","text":"You won’t believe this..."}]}'></textarea><div class="row"><button class="subtle" onclick="importAssistantStory()">Import story JSON</button></div><h3 style="margin-top:26px">Publishing draft queue</h3><p class="muted">Select a finished video in Library, approve it after the quality check, then return here to stage its title and description. Nothing will upload to YouTube.</p><label for="draftVideoId">Approved video ID</label><input id="draftVideoId" placeholder="Choose a video in Library first" readonly><label for="draftPrivacy">Desired YouTube visibility</label><select id="draftPrivacy"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public — still a draft only</option></select><div class="row"><button onclick="stagePublishingDraft()">Save publishing draft</button><button class="subtle" onclick="refreshPublishingDrafts()">Refresh drafts</button></div><div class="help" id="draftFeedback">Drafts are stored locally; no platform account is connected.</div><div id="draftQueue" class="muted"></div><h3 style="margin-top:26px">Publishing safety</h3><p class="muted">Draft → Review → Explicit approval → Publish using your connected YouTube/vidIQ service. No auto-publication or stored YouTube credentials in this release.</p></section><script>
 
 
 
@@ -1476,6 +1500,10 @@ async function importMusic(){
  }catch(error){el('musicStatus').textContent=error.message}
 }
 refreshMusic();
+function confirmPremium(settings, action){
+ return ![settings.voice,settings.second_voice].some(voice=>voice.startsWith('elevenlabs:')) ||
+  confirm(action+' with ElevenLabs? This may use credits.');
+}
 function productionSettings(){
  if(!el('voiceVolume').checkValidity() || !el('musicVolume').checkValidity())throw Error('Enter a voice level of 25–150% and music level of 0–100%.');
  return {style:el('style').value,voice:el('voice').value,second_voice:el('secondVoice').value,
@@ -1486,8 +1514,7 @@ function productionSettings(){
 async function renderVideo(automatic=false){
  let settings;
  try{settings=productionSettings()}catch(error){setStatus(error.message);return}
- if([settings.voice,settings.second_voice].some(voice=>voice.startsWith('elevenlabs:')) &&
-    !confirm('Render with the selected ElevenLabs voice? This may use credits.'))return;
+ if(!confirmPremium(settings,'Render this video'))return;
  el('renderBtn').disabled=true;
  el('videoSection').style.display='none';
  el('progress').value=0;el('progress').style.display='block';
@@ -1608,17 +1635,47 @@ async function loadProject(){
  }catch(error){setStatus(error.message)}
 }
 
-async function startReadyBatch(){
- const btn=el('readyBatchBtn'); btn.disabled=true;
- try{
-  const d=await api('/api/batch-ready',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({story_indices:[0,1,2],style:el('style').value,voice:el('voice').value,voice_rate:Number(el('voiceRate').value),resolution:el('resolution').value,gameplay_id:el('gameplayChoice').value||null})});
-  el('batchStatus').textContent='Started three original stories. You can review them in Library after rendering.';
-  await batchPoll(d.id);
- }catch(e){el('batchStatus').textContent='Batch error: '+e.message}
- finally{btn.disabled=false}
+function startReadyBatch(){
+ return queueBatch('/api/batch-ready',{story_indices:[0,1,2]});
 }
-async function startBatch(){const ideas=el('batchIdeas').value.split('\n').map(s=>s.trim()).filter(Boolean);if(!ideas.length||ideas.length>8){el('batchStatus').textContent='Enter 1–8 story ideas';return}el('batchBtn').disabled=true;try{const d=await api('/api/batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ideas,style:el('style').value,target:Number(el('target').value),voice:el('voice').value,voice_rate:Number(el('voiceRate').value),resolution:el('resolution').value,gameplay_id:el('gameplayChoice').value||null})});el('batchStatus').textContent='Rendering batch '+d.id;await batchPoll(d.id)}catch(e){el('batchStatus').textContent='Batch error: '+e.message;el('batchBtn').disabled=false}}
-async function batchPoll(id){try{const d=await api('/api/job/'+id);el('batchStatus').textContent=d.message+' ('+d.percent+'%)';await refreshJobs();if(d.state==='running'){setTimeout(()=>batchPoll(id),2500);return}el('batchBtn').disabled=false;if(d.state==='complete'){el('batchStatus').textContent+=' — Open Library to review and approve.';await refreshLibrary()}}catch(e){el('batchStatus').textContent=e.message;el('batchBtn').disabled=false}}
+function startBatch(){
+ const ideas=el('batchIdeas').value.split('\n').map(value=>value.trim()).filter(Boolean);
+ if(!ideas.length||ideas.length>8){el('batchStatus').textContent='Enter 1–8 story ideas';return}
+ return queueBatch('/api/batch',{ideas});
+}
+function startRandomBatch(){
+ const input=el('batchCount');
+ if(!input.reportValidity()||!input.value){el('batchStatus').textContent='Enter a count from 1 to 8';return}
+ return queueBatch('/api/batch-random',{count:Number(input.value),genre:el('genre').value});
+}
+async function queueBatch(endpoint, choices){
+ const status=el('batchStatus');
+ const buttons=[el('readyBatchBtn'),el('batchBtn'),el('randomBatchBtn')];
+ try{
+  const settings=productionSettings();
+  if(!confirmPremium(settings,'Render this entire batch'))return;
+  buttons.forEach(button=>button.disabled=true);
+  const target=Number(el('target').value);
+  const request={...settings,...choices,target,ending:el('ending').value,
+   target_seconds:el('fitDuration').checked?target:null};
+  if(endpoint==='/api/batch-random'&&!request.gameplay_id)request.gameplay_id='auto';
+  const queued=await api(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
+  while(true){
+   const batch=await api('/api/job/'+queued.id);
+   status.textContent=batch.message+' ('+batch.percent+'%)';
+   await refreshJobs();
+   if(batch.state!=='running'){
+    if(batch.video_ids.length){
+     status.textContent+=' · '+batch.video_ids.length+' video(s) in Review Library.';
+     await refreshLibrary();
+    }
+    break;
+   }
+   await new Promise(resolve=>setTimeout(resolve,2500));
+  }
+ }catch(error){status.textContent='Batch error: '+error.message}
+ finally{buttons.forEach(button=>button.disabled=false)}
+}
 async function refreshLibrary(){
  try{
   const data=await api('/api/library');const grid=el('libraryGrid');grid.replaceChildren();
