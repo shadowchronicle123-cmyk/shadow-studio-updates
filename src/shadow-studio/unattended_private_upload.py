@@ -42,6 +42,10 @@ def verified_narration_report(root, day, manifest):
     actual_digest = hashlib.sha256(path.read_bytes()).hexdigest()
     if actual_digest != expected_digest:
         raise ValueError("Narration WAV differs from its verified export manifest")
+    # The owner approves the exact audio bytes, not just a reusable voice ID.
+    approved_digest = os.getenv("SHADOW_APPROVED_NARRATION_SHA256", "").lower()
+    if len(approved_digest) != 64 or approved_digest != actual_digest:
+        raise ValueError("This exact narration audio has not been approved by the owner")
     report = inspect_wav(path)
     decision = check_unattended_narration(
         engine=engine, voice_id=voice, review_approved=approved, audio_report=report)
