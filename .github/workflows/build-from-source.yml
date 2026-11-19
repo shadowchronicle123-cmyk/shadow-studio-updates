@@ -52,6 +52,11 @@ jobs:
           old_ver = old.get("version", "0.0.0")
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               out.write("version=" + version + "\n")
+          if Version(version) <= Version(old_ver):
+              print("No newer release: source", version, "live", old_ver)
+              with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+                  out.write("publish=false\\n".replace("\\n", "\n"))
+              sys.exit(0)
           archive_path = pathlib.Path("/tmp/shadow-studio-v" + version + "-source.zip")
           forbidden = {".env", ".venv", "__pycache__", "backups", "outputs", "projects", "uploads", "gameplay", "clips", ".git"}
           source_files = []
@@ -64,7 +69,7 @@ jobs:
               if p.suffix.lower() in {".mp4", ".mov", ".mp3", ".wav", ".pyc", ".zip"}:
                   continue
               source_files.append((p, "shadow-studio/" + rel.as_posix()))
-          with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+          with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
               for p, arcname in source_files:
                   z.write(p, arcname)
           with zipfile.ZipFile(archive_path) as z:
@@ -72,11 +77,6 @@ jobs:
                   sys.exit("Built archive failed integrity check")
           digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
           print("Built", archive_path, "sha256", digest)
-          if Version(version) <= Version(old_ver):
-              print("No newer release: source", version, "live", old_ver)
-              with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-                  out.write("publish=false\n")
-              sys.exit(0)
           filename = archive_path.name
           destination = docs / filename
           destination.write_bytes(archive_path.read_bytes())
@@ -95,7 +95,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/latest.json docs/shadow-studio-v*.zip
+          git add docs/latest.json "docs/shadow-studio-v${{ steps.package.outputs.version }}-source.zip"
           git commit -m "Release Shadow Studio v${{ steps.package.outputs.version }}"
           git push
       - name: Upload GitHub Pages files
