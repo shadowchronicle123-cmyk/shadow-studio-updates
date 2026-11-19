@@ -1,11 +1,16 @@
 name: Build and publish Shadow Studio from source
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'src/shadow-studio/**'
-      - '.github/workflows/build-from-source.yml'
   workflow_dispatch:
+    inputs:
+      approved:
+        description: Confirm the owner explicitly approved this operation
+        type: boolean
+        required: true
+        default: false
+      sha256:
+        description: SHA-256 of the exact approved candidate ZIP
+        type: string
+        required: true
 
 permissions:
   contents: write
@@ -14,11 +19,11 @@ permissions:
 
 concurrency:
   group: shadow-studio-release
-  # Ordinary pushes wait their turn. An explicitly marked recovery can replace a stalled run.
-  cancel-in-progress: ${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Retry stalled Shadow Studio release') }}
+  cancel-in-progress: false
 
 jobs:
   windows-smoke:
+    if: github.ref == 'refs/heads/main' && inputs.approved
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +56,7 @@ jobs:
 
   build:
     needs: windows-smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       publish: ${{ steps.package.outputs.publish }}
       version: ${{ steps.package.outputs.version }}
@@ -87,6 +92,8 @@ jobs:
       - name: Test, package, and verify release
         id: package
         shell: bash
+        env:
+          APPROVED_SHA256: ${{ inputs.sha256 }}
         run: |
           python - <<'PY'
           import hashlib, json, os, pathlib, py_compile, re, subprocess, sys, zipfile
@@ -116,26 +123,15 @@ jobs:
                   out.write("publish=false\\n".replace("\\n", "\n"))
               sys.exit(0)
           archive_path = pathlib.Path("/tmp/shadow-studio-v" + version + "-source.zip")
-          forbidden = {".env", ".venv", "__pycache__", "backups", "outputs", "projects", "uploads", "gameplay", "clips", "media", "update_backups", "publishing_drafts", "browser-evidence", "node_modules", ".git"}
-          source_files = []
-          tracked = subprocess.check_output(["git", "ls-files", "-z", str(root)]).decode().split("\0")
-          for name in sorted(filter(None, tracked)):
-              p = pathlib.Path(name)
-              if not p.is_file() or p.is_symlink():
-                  continue
-              rel = p.relative_to(root)
-              if any(part in forbidden for part in rel.parts):
-                  continue
-              if p.suffix.lower() in {".mp4", ".mov", ".mp3", ".wav", ".pyc", ".zip"}:
-                  continue
-              source_files.append((p, "shadow-studio/" + rel.as_posix()))
-          with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
-              for p, arcname in source_files:
-                  z.write(p, arcname)
+          sys.path.insert(0, str(root))
+          from migration_acceptance_test import package
+          archive_path.write_bytes(package())
           with zipfile.ZipFile(archive_path) as z:
               if z.testzip() or "shadow-studio/app.py" not in z.namelist():
                   sys.exit("Built archive failed integrity check")
           digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+          if digest != os.environ["APPROVED_SHA256"].strip().lower():
+              sys.exit("The built ZIP differs from the approved candidate")
           print("Built", archive_path, "sha256", digest)
           filename = archive_path.name
           destination = docs / filename

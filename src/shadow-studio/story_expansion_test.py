@@ -38,6 +38,15 @@ def main():
             assert short['genre'] == genre and len(short['lines']) < len(long['lines'])
         assert client.post('/api/story', json={**payload, 'genre': 'invalid'}).status_code == 400
         assert client.post('/api/story', json={'genre': 'horror'}).status_code == 200
+    for idea, expected in [('My roommate overcharged me for our rent in October.', 'Roommate'),
+                           ('My coworker blamed me for a mistake during second shift.', 'Coworker')]:
+        seen = []
+        for _ in range(3):
+            story = client.post('/api/story',json={**payload,'idea':idea,'avoid':seen}).json()['story']
+            assert any(line['text']==idea for line in story['lines'])
+            assert {line['speaker'] for line in story['lines']} == {'Me',expected}
+            assert story['variant'].split(':')[0] not in {variant.split(':')[0] for variant in seen}
+            seen.append(story['variant'])
     with patch.dict('os.environ', {'SHADOW_OLLAMA_MODEL': ''}):
         assert client.post('/api/story', json={**payload, 'provider': 'ollama'}).status_code == 400
     premium='elevenlabs:fakeIdentifier'

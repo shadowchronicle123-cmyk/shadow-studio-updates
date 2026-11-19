@@ -25,6 +25,20 @@ def gameplay_duration(path):
     return duration
 
 
+def gameplay_window(path, start=None, end=None):
+    """Validate an optional trim against the original clip without changing it."""
+    if start is None and end is None:
+        return None
+    if path is None:
+        raise ValueError('Choose gameplay before setting a trim.')
+    duration = gameplay_duration(path)
+    start = 0.0 if start is None else start
+    end = duration if end is None else min(end, duration) if end <= duration + .025 else end
+    if not 0 <= start < end <= duration or end - start < .5:
+        raise ValueError(f'Choose at least 0.5 seconds within this {duration:.2f}-second gameplay clip.')
+    return start, end
+
+
 class GameplayLibrary:
     def __init__(self, root):
         self.root=Path(root);self.root.mkdir(parents=True,exist_ok=True)

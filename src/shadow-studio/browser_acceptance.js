@@ -47,6 +47,8 @@ const path=require('node:path');
   await page.waitForFunction(()=>document.querySelector('#gameplayStatus').textContent.startsWith('Saved Acceptance footage'));
   await page.getByLabel('Gameplay height').selectOption('60');
   await page.getByLabel('Gameplay crop').selectOption('top');
+  await page.getByLabel('Loop start (seconds)').fill('0.25');
+  await page.getByLabel('Loop end (seconds)').fill('1.25');
   await page.getByRole('button',{name:'Preview layout'}).click();
   await page.locator('#layoutImage').waitFor({state:'visible'});
   await page.waitForFunction(()=>document.querySelector('#layoutImage').naturalWidth===1080);
@@ -57,6 +59,12 @@ const path=require('node:path');
   await page.getByRole('button',{name:'Render MP4',exact:true}).click();
   await page.getByRole('button',{name:'Review export'}).waitFor({state:'visible',timeout:100000});
   await page.waitForFunction(()=>document.querySelector('#preview').videoWidth===1080);
+  if(process.env.SHADOW_ARTIFACT_DIR){
+   const videoUrl=await page.locator('#preview').evaluate(video=>video.src);
+   const response=await page.request.get(videoUrl);
+   assert(response.ok());
+   fs.writeFileSync(path.join(process.env.SHADOW_ARTIFACT_DIR,'short-preview.mp4'),await response.body());
+  }
   await page.getByRole('button',{name:'Review export'}).click();
   await page.getByRole('button',{name:'Run video quality check',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('#qualityPanel').textContent.includes('Technical export: OK'));

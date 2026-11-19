@@ -1,10 +1,12 @@
 name: Verify and publish uploaded Shadow Studio updates
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'docs/shadow-studio-v*.zip'
   workflow_dispatch:
+    inputs:
+      approved:
+        description: Confirm the owner explicitly approved this operation
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: write
@@ -17,6 +19,7 @@ concurrency:
 
 jobs:
   validate:
+    if: github.ref == 'refs/heads/main' && inputs.approved
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
