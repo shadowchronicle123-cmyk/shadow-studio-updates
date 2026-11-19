@@ -37,7 +37,17 @@ def analyze(path: Path):
         elif abs(width/height-9/16)>0.025:warnings.append('Aspect ratio is not exactly 9:16')
         if fps<24:warnings.append('Low frame rate: target at least 24 FPS')
         if width<720 or height<1280:warnings.append('Resolution below 720×1280')
-    if not audios: blockers.append('MP4 contains no narration/audio track')
+    if not audios:
+        blockers.append('MP4 contains no narration/audio track')
+    elif videos:
+        try:
+            delta = abs(float(videos[0]['duration']) - float(audios[0]['duration']))
+        except (KeyError, TypeError, ValueError):
+            delta = 0
+        if delta > 1:
+            blockers.append('Audio and picture end more than a second apart')
+        elif delta > .35:
+            warnings.append('Audio and picture end at different times. Watch the ending before approval.')
     # Metadata alone is insufficient: corrupted video frames may have valid
     # streams, duration and audio. Decode the full video stream without writing
     # another file; -xerror makes corruption fail instead of being concealed.
@@ -83,6 +93,8 @@ def analyze(path: Path):
                 overall_max_volume = float(found.group(1).lower())
                 if overall_max_volume < -55:
                     blockers.append('Entire audio track is silent or effectively silent')
+                if not math.isfinite(overall_max_volume):
+                    overall_max_volume = None
         except (subprocess.TimeoutExpired,OSError):
             blockers.append('Full narration audio could not be verified')
     return {'passed':not blockers,'status':'blocked' if blockers else 'review_required' if warnings else 'technical_pass',

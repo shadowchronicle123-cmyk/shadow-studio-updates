@@ -1,0 +1,82 @@
+name: Shadow Studio production acceptance
+on:
+  push:
+    branches: [production-overhaul-v042]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shadow-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  acceptance:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 22
+    env:
+      PYTHONUTF8: 1
+    defaults:
+      run:
+        working-directory: src/shadow-studio
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: src/shadow-studio/requirements.txt
+      - name: Install Linux FFmpeg
+        if: runner.os == 'Linux'
+        timeout-minutes: 6
+        run: bash ../../.github/scripts/setup-test-ffmpeg.sh
+      - name: Install Windows FFmpeg
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -or -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Install app dependencies
+        run: python -m pip install --timeout 25 --retries 2 -r requirements.txt
+      - name: Test story, render, publishing and migration
+        run: |
+          python self_test.py
+          python story_expansion_test.py
+          python production_smoke_test.py
+          python conversation_test.py
+          python audio_mix_test.py
+          python batch_render_test.py
+          python integration_test.py
+          python integration_acceptance_v027.py
+          python cloud_handoff_test.py
+          python update_manager_test.py
+          python migration_acceptance_test.py
+      - name: Test real offline Windows voice
+        if: runner.os == 'Windows'
+        run: python windows_voice_test.py
+      - uses: actions/setup-node@v4
+        if: runner.os == 'Windows'
+        with:
+          node-version: '22'
+      - name: Browser workflow on Windows
+        if: runner.os == 'Windows'
+        run: |
+          npm install --no-save --no-package-lock playwright@1.56.1
+          mkdir -p browser-evidence
+          SHADOW_BROWSER_CHANNEL=chrome SHADOW_ARTIFACT_DIR=browser-evidence node browser_acceptance.js
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows' && always()
+        with:
+          name: windows-browser-evidence
+          path: src/shadow-studio/browser-evidence
+          if-no-files-found: ignore

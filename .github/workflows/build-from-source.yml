@@ -43,6 +43,11 @@ jobs:
           python production_smoke_test.py
           python audio_mix_test.py
           python update_manager_test.py
+          python story_expansion_test.py
+          python conversation_test.py
+          python cloud_handoff_test.py
+          python migration_acceptance_test.py
+          python windows_voice_test.py
 
   build:
     needs: windows-smoke
@@ -63,10 +68,7 @@ jobs:
       - name: Install export test dependencies
         timeout-minutes: 4
         run: |
-          if ! command -v ffmpeg || ! command -v ffprobe; then
-            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 update
-            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 install -y ffmpeg
-          fi
+          bash .github/scripts/setup-test-ffmpeg.sh
           python -m pip install --disable-pip-version-check --timeout 20 --retries 2 packaging -r src/shadow-studio/requirements.txt
       - name: Run offline release tests
         working-directory: src/shadow-studio
@@ -76,6 +78,10 @@ jobs:
           python production_smoke_test.py
           python audio_mix_test.py
           python update_manager_test.py
+          python story_expansion_test.py
+          python conversation_test.py
+          python cloud_handoff_test.py
+          python migration_acceptance_test.py
           python integration_acceptance_v027.py
           python batch_render_test.py
       - name: Test, package, and verify release
@@ -110,7 +116,7 @@ jobs:
                   out.write("publish=false\\n".replace("\\n", "\n"))
               sys.exit(0)
           archive_path = pathlib.Path("/tmp/shadow-studio-v" + version + "-source.zip")
-          forbidden = {".env", ".venv", "__pycache__", "backups", "outputs", "projects", "uploads", "gameplay", "clips", "media", "update_backups", ".git"}
+          forbidden = {".env", ".venv", "__pycache__", "backups", "outputs", "projects", "uploads", "gameplay", "clips", "media", "update_backups", "publishing_drafts", "browser-evidence", "node_modules", ".git"}
           source_files = []
           tracked = subprocess.check_output(["git", "ls-files", "-z", str(root)]).decode().split("\0")
           for name in sorted(filter(None, tracked)):

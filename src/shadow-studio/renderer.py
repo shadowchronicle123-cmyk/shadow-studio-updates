@@ -80,92 +80,85 @@ def text_wrap(draw,text,ft,max_width):
     return out
 
 
-def _visible_messages(draw, lines, ft, width, available_height, *, row_height, header_height, gap, max_lines):
-    """Keep the newest message visible; hide earlier bubbles before overflow."""
-    visible=[];total=0
-    for item in reversed(lines):
-        rows=text_wrap(draw, item['text'], ft, width)
-        if len(rows)>max_lines:
-            rows=rows[:max_lines]
-            rows[-1]=rows[-1].rstrip(' .') + '…'
-        height=header_height + row_height * len(rows)
-        cost=height + (gap if visible else 0)
-        if total+cost>available_height:
-            if visible:break
-            # Latest message is mandatory. Trim its visible rows if necessary.
-            rows=rows[:max(1,int((available_height-header_height)//row_height))]
-            rows[-1]=rows[-1].rstrip(' .')+'…'
-            height=header_height+row_height*len(rows)
-            cost=height
-        visible.append((item,rows,height))
-        total+=cost
-    return list(reversed(visible)),total
+def conversation_frame(story, index, style, *, size=(W,H), gameplay_percent=0, entrance=1):
+    """Compose the same fully settled scene used by the storyboard and MP4."""
+    width, height = size
+    scale = width / W
+    unit = lambda value: round(value * scale)
+    panel = gameplay_dimensions(height, gameplay_percent)[0] if gameplay_percent else height
+    image = Image.new('RGB', size, '#101422')
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, width, unit(65)), fill='#151a29')
+    draw.ellipse((unit(21), unit(17), unit(54), unit(50)), fill='#bdffdf')
+    draw.text((unit(29), unit(19)), 'S', font=font(unit(22),True), fill='#172539')
+    header = 'ShadowChronicles' if style == 'messages' else 'ShadowChronicles / Stories'
+    draw.text((unit(66), unit(23)), header, font=font(unit(23),True), fill='#f4fff9')
+    draw.line((0, unit(64), width, unit(64)), fill='#3a465c', width=max(1,unit(1)))
+    if gameplay_percent:
+        draw.rectangle((0, panel-unit(4), width, panel), fill='#89e9be')
+    if index < 0:
+        return image
 
-def png_frame(path,story,index,style):
-    im=Image.new('RGB',(W,H),(12,17,31));d=ImageDraw.Draw(im)
-    # Original gradient background, no copyrighted gameplay required.
-    for y in range(H):
-        c=(int(13+22*y/H),int(9+8*y/H),int(16+19*y/H))
-        d.line((0,y,W,y),fill=c)
-    title='SHADOWCHRONICLES'; d.text((26,38),title,font=font(26,True),fill='#fff0f1')
-    d.rounded_rectangle((20,96,W-20,H-125),radius=25,fill='#190d15',outline='#623246',width=2)
-    d.text((40,126),'FICTIONAL STORY  •  PART 1',font=font(16,True),fill='#d98ca0')
-    displayed=story['lines'][:index+1]
-    if style=='reddit':
-        current=displayed[-1]
-        d.text((44,210),'r/ShadowChronicles',font=font(24,True),fill='#ffd8de')
-        block=text_wrap(d,current['text'],font(35,True),440)
-        for j,line in enumerate(block[:11]):d.text((46,290+49*j),line,font=font(35,True),fill='white')
-    else:
-        bubbles,total=_visible_messages(d,displayed[-5:],font(24),376,598,
-                                        row_height=34,header_height=50,gap=18,max_lines=10)
-        y=max(202,800-total)
-        if y > 485:
-            # When only a few messages are on screen, use the open area for a
-            # cinematic story heading rather than leaving a large blank panel.
-            headline = text_wrap(d, str(story.get('title','STORY TIME')).replace('#Shorts','').strip(), font(32, True), 445)[:3]
-            for j, text_line in enumerate(headline):
-                d.text((43, 240 + j * 44), text_line, font=font(32,True), fill='#fbe5e9')
-            d.rounded_rectangle((43, 400, 142, 405), radius=2, fill='#ba3157')
-        for item,lines,height in bubbles:
-            me=item['speaker'].lower() in ('me','narrator')
-            x=96 if me else 36; right=502 if me else 442
-            d.rounded_rectangle((x,y,right,y+height),radius=20,fill=('#9d2646' if me else '#33212d'))
-            d.text((x+16,y+9),item['speaker'],font=font(17,True),fill='#ffe2e9')
-            for j,line in enumerate(lines):d.text((x+16,y+35+34*j),line,font=font(24),fill='white')
-            y+=height+18
-    d.rounded_rectangle((28,H-98,W-28,H-35),radius=18,fill='#711b39')
-    d.text((49,H-81),'COMMENT WHAT YOU WOULD DO  ↓',font=font(20,True),fill='#ffffff')
-    im.save(path)
-
-def gameplay_frame(path,story,index,style):
-    """Draw chronological dialogue in the upper 42% of the video."""
-    im = Image.new('RGB', (W, H), '#101421')
-    draw = ImageDraw.Draw(im)
-    draw.line((20, 58, W-20, 58), fill='#39425a', width=2)
-    draw.text((22, 22), 'SHADOWCHRONICLES', font=font(21, True), fill='#f4e8ff')
-    recent = story['lines'][max(0, index-3):index+1]
-    text_font = font(22)
-    newest = recent[-1]['text']
-    for size in (21, 20, 19, 18):
-        if len(text_wrap(draw, newest, text_font, 366)) <= 8:
+    rows = story['lines'][:index+1]
+    if style == 'reddit':
+        rows = rows[-1:]
+    keys = list(dict.fromkeys(str(line.get('speaker','Narrator')).strip().casefold() for line in story['lines']))
+    colors = ('#244b40', '#342c57', '#234461', '#594128', '#62394f', '#375164')
+    labels = ('#b0f6d6', '#e2d5ff', '#c9ebff', '#ffe0ae', '#ffd7ed', '#d8f2ff')
+    max_width = unit(422 if style == 'messages' else 456)
+    pad = unit(15)
+    floor = panel-unit(18)
+    top = unit(79)
+    bubbles = []
+    total = 0
+    for line in reversed(rows[-5:]):
+        name = str(line.get('speaker','Narrator')).strip() or 'Narrator'
+        ordinal = keys.index(str(line.get('speaker','Narrator')).strip().casefold())
+        for size_px in range(26, 13, -1):
+            body = font(unit(size_px))
+            wrapped = text_wrap(draw, line['text'], body, max_width-2*pad)
+            row_height = unit(size_px+6)
+            bubble_height = unit(43)+len(wrapped)*row_height
+            if bubble_height <= floor-top and (not bubbles or size_px >= 24):
+                break
+        if total+bubble_height > floor-top:
             break
-        text_font = font(size)
-    blocks, total = _visible_messages(draw, recent, text_font, 366, 304,
-                                      row_height=29, header_height=44, gap=9, max_lines=8)
-    speakers = list(dict.fromkeys(str(line.get('speaker', 'Narrator')).strip().casefold() for line in story['lines']))
-    colors = ('#793553', '#2b456a', '#306052', '#68502d', '#553c76')
-    y = 380 - total
-    for item, rows, height in blocks:
-        speaker_index = speakers.index(str(item.get('speaker', 'Narrator')).strip().casefold())
-        x = 126 if speaker_index == 0 else 24
-        draw.rounded_rectangle((x, y, x+390, y+height), radius=17,
-                               fill=colors[speaker_index % len(colors)])
-        draw.text((x+12, y+8), str(item.get('speaker', 'Narrator')), font=font(16, True), fill='#f1dfee')
-        for j, line in enumerate(rows):
-            draw.text((x+12, y+32+29*j), line, font=text_font, fill='white')
-        y += height + 9
-    im.save(path)
+        actual_width = max(unit(135), min(max_width,
+            max([draw.textlength(row,font=body) for row in wrapped] +
+                [draw.textlength(name,font=font(unit(16),True))])+2*pad))
+        bubbles.append((name,ordinal,wrapped,body,row_height,bubble_height,round(actual_width)))
+        total += bubble_height+unit(10)
+    if not bubbles:
+        raise ValueError('A dialogue line could not fit. Shorten the line or use a smaller gameplay panel.')
+
+    if not gameplay_percent:
+        title = str(story.get('title','')).replace('#Shorts','').strip()
+        heading = text_wrap(draw,title,font(unit(31),True),unit(464))[:3]
+        if floor-total > unit(260):
+            for row, line in enumerate(heading):
+                draw.text((unit(30),unit(108+39*row)),line,font=font(unit(31),True),fill='#ecfff8')
+
+    y = floor-total+unit(10)
+    for position, (name, ordinal, wrapped, body, row_height, bubble_height, bubble_width) in enumerate(reversed(bubbles)):
+        last = position==len(bubbles)-1
+        right = ordinal%2==0 and style=='messages'
+        x = width-unit(23)-bubble_width if right else unit(23)
+        slide = unit(14)*(1-entrance)*(-1 if not right else 1) if last else 0
+        x += round(slide)
+        layer = Image.new('RGBA',size) if last and entrance<1 else None
+        # Use a temporary layer for the new bubble only so earlier dialogue stays legible.
+        pen = ImageDraw.Draw(layer) if layer is not None else draw
+        fill = colors[ordinal%len(colors)]
+        label = labels[ordinal%len(labels)]
+        pen.rounded_rectangle((x,y,x+bubble_width,y+bubble_height),radius=unit(20),fill=fill,outline=label,width=max(1,unit(1)))
+        pen.text((x+pad,y+unit(8)),name,font=font(unit(16),True),fill=label)
+        for row, line in enumerate(wrapped):
+            pen.text((x+pad,y+unit(30)+row_height*row),line,font=body,fill='#f9fffb')
+        if layer is not None:
+            alpha = layer.getchannel('A').point(lambda value: round(value*entrance))
+            image.paste(layer, (0,0), alpha)
+        y += bubble_height+unit(10)
+    return image
 
 
 def line_pause(line):
@@ -179,48 +172,45 @@ def line_pause(line):
     return pause
 
 
-def gameplay_dimensions(height):
-    panel = round(height * 0.42 / 2) * 2
+def gameplay_dimensions(height, gameplay_percent=58):
+    panel = round(height * (100-gameplay_percent) / 200) * 2
     return panel, height - panel
 
 
-def gameplay_crop(width, height):
+def gameplay_crop(width, height, anchor='center'):
+    y = {'top':'0', 'bottom':'ih-oh', 'center':'(ih-oh)/2'}[anchor]
     return (f'scale={width}:{height}:force_original_aspect_ratio=increase:force_divisible_by=2,'
-            f'crop={width}:{height},setsar=1')
+            f'crop={width}:{height}:(iw-ow)/2:{y},setsar=1')
 
 
-def preview_layout(story, index, style, *, show_gameplay=False, background=None, start=0):
-    """Render one representative scene without synthesizing narration."""
-    with tempfile.TemporaryDirectory(prefix='shadow_layout_') as folder:
-        destination = Path(folder) / 'scene.png'
-        if not show_gameplay:
-            png_frame(destination, story, index, style)
-            return destination.read_bytes()
-        gameplay_frame(destination, story, index, style)
-        panel_height, gameplay_height = gameplay_dimensions(H)
-        with Image.open(destination) as source:
-            frame = source.convert('RGB')
-        if background:
-            sample = Path(folder) / 'gameplay.png'
-            args = ['ffmpeg', '-y', '-loglevel', 'error', '-threads', '1',
-                    '-ss', str(start), '-i', str(background), '-map', '0:v:0', '-frames:v', '1',
-                    '-filter_threads', '1', '-vf', gameplay_crop(W, gameplay_height), '-threads', '1', str(sample)]
-            for seek in (start, 0):
-                args[7] = str(seek)
-                result = subprocess.run(args, capture_output=True, text=True, timeout=15)
-                if result.returncode == 0 and sample.is_file():
+def preview_layout(story, index, style, *, show_gameplay=False, background=None, start=0,
+                   gameplay_percent=58, gameplay_anchor='center', resolution='720p'):
+    """Render the exact export layout without synthesizing narration."""
+    size = (1080,1920) if resolution=='1080p' else (720,1280)
+    width,height = size
+    panel_height,gameplay_height = gameplay_dimensions(height,gameplay_percent)
+    frame = conversation_frame(story,index,style,size=size,gameplay_percent=gameplay_percent if show_gameplay else 0)
+    if show_gameplay and background:
+        with tempfile.TemporaryDirectory(prefix='shadow_layout_') as folder:
+            sample = Path(folder)/'gameplay.png'
+            for seek in (start,0):
+                args = ['ffmpeg','-y','-loglevel','error','-threads','1','-ss',str(seek),'-i',str(background),
+                        '-map','0:v:0','-frames:v','1','-filter_threads','1','-vf',
+                        gameplay_crop(width,gameplay_height,gameplay_anchor),'-threads','1',str(sample)]
+                result = subprocess.run(args,capture_output=True,text=True,timeout=15)
+                if result.returncode==0 and sample.is_file():
                     break
             else:
                 raise RuntimeError('Could not preview the selected gameplay clip')
             with Image.open(sample) as gameplay:
-                frame.paste(gameplay, (0, panel_height))
-        else:
-            draw = ImageDraw.Draw(frame)
-            draw.rectangle((0, panel_height, W, H), fill='#263549')
-            draw.text((24, panel_height+28), 'Gameplay placement preview', font=font(23, True), fill='white')
-        output = io.BytesIO()
-        frame.save(output, format='PNG')
-        return output.getvalue()
+                frame.paste(gameplay,(0,panel_height))
+    elif show_gameplay:
+        draw = ImageDraw.Draw(frame)
+        draw.rectangle((0,panel_height,width,height),fill='#263549')
+        draw.text((28,panel_height+32),'Gameplay placement preview',font=font(26,True),fill='white')
+    output = io.BytesIO()
+    frame.save(output,format='PNG')
+    return output.getvalue()
 
 
 SCENE_PACING = {"snappy": (0.2, 1.2), "normal": (0.5, 2.25), "deliberate": (0.85, 2.6)}
@@ -256,7 +246,7 @@ def dialogue_holds(narration, gap, minimum_hold, target_seconds=None):
 
 
 def generate(story,output_dir,style='messages',background=None,progress=None,voice='en-US-AriaNeural',second_voice=None,voice_rate=0,resolution='720p',gameplay_start=0,*,pacing='normal',captions=True,
-             music=None,voice_volume=100,music_volume=22,target_seconds=None):
+             music=None,voice_volume=100,music_volume=22,target_seconds=None,gameplay_percent=58,gameplay_anchor="center",primary_speaker=None):
     gap, minimum_hold = SCENE_PACING[pacing]
     if not isinstance(story, dict) or not isinstance(story.get('lines'), list) or not 1 <= len(story['lines']) <= 24:
         raise ValueError('Story requires 1 to 24 narration scenes')
@@ -267,9 +257,11 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
         line_sound(line)
     if resolution not in ('720p','1080p'):raise ValueError('Choose 720p or 1080p')
     out_width,out_height=(720,1280) if resolution=='720p' else (1080,1920)
+    has_gameplay=bool(background)
+    layout={'size':(out_width,out_height),'gameplay_percent':gameplay_percent if has_gameplay else 0}
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):raise RuntimeError('FFmpeg and ffprobe are required on PATH')
     output_dir=Path(output_dir);output_dir.mkdir(parents=True,exist_ok=True)
-    first_speaker=str(story['lines'][0].get('speaker','Narrator')).strip().casefold()
+    first_speaker=str(primary_speaker or story['lines'][0].get('speaker','Narrator')).strip().casefold()
     if second_voice is not None:
         from voice_engine import valid_voice
         if not valid_voice(second_voice): raise ValueError('Second character voice is unavailable')
@@ -291,8 +283,7 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
             narration.append((offset, spoken))
             wavs.append(normalized)
             img=tmp/f'scene_{i:03}.png'
-            if background:gameplay_frame(img,story,i,style)
-            else:png_frame(img,story,i,style)
+            conversation_frame(story,i,style,**layout).save(img)
             images.append(img)
         holds = dialogue_holds(narration, gap, minimum_hold, target_seconds)
         for i, (img, (offset, _), frames) in enumerate(zip(images, narration, holds)):
@@ -302,9 +293,16 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
                 previous = tmp / f'scene_{i-1:03}.png'
                 if i == 0:
                     previous = tmp / 'opening.png'
-                    Image.new('RGB', (W, H), '#101421').save(previous)
+                    conversation_frame(story,-1,style,**layout).save(previous)
                 concat.append((previous, offset))
-            concat.append((img, hold))
+            # Six short animation frames start at the voice/caption cue.
+            count = min(6, frames-1)
+            for frame in range(count):
+                animated = tmp/f'entrance_{i:03}_{frame}.png'
+                phase = 1-(1-(frame+1)/(count+1))**2
+                conversation_frame(story,i,style,entrance=phase,**layout).save(animated)
+                concat.append((animated,1/30))
+            concat.append((img,(frames-count)/30))
         captions_path = output_dir / 'captions.srt'
         if captions:
             save_scene_subtitles(story, durations, captions_path, narration)
@@ -342,8 +340,8 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
         output=output_dir/'short.mp4'
         args=['ffmpeg','-y','-loglevel','error','-i',visual,'-i',audio]
         if background and Path(background).is_file():
-            panel_height, gameplay_height = gameplay_dimensions(out_height)
-            crop = gameplay_crop(out_width, gameplay_height)
+            panel_height, gameplay_height = gameplay_dimensions(out_height,gameplay_percent)
+            crop = gameplay_crop(out_width,gameplay_height,gameplay_anchor)
             filters = []
             if gameplay_start > 0:
                 # Seek only the first play. Subsequent plays start at frame zero.

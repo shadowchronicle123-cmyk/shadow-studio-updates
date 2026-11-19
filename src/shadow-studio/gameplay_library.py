@@ -3,6 +3,28 @@ from __future__ import annotations
 import json, re, subprocess, threading
 from pathlib import Path
 
+def gameplay_duration(path):
+    """Check for playable video frames rather than accepting any media duration."""
+    try:
+        result = subprocess.run(
+            ['ffprobe','-v','error','-select_streams','V:0','-show_entries',
+             'stream=width,height:format=duration','-of','json',str(path)],
+            capture_output=True,text=True,timeout=30,check=True,
+        )
+        info = json.loads(result.stdout)
+        video = info['streams'][0]
+        duration = float(info['format']['duration'])
+        if not video.get('width') or not video.get('height'):
+            raise ValueError('missing dimensions')
+    except FileNotFoundError as exc:
+        raise ValueError('FFprobe is required to verify gameplay. Install FFmpeg and try again.') from exc
+    except (ValueError, KeyError, IndexError, OSError, subprocess.SubprocessError) as exc:
+        raise ValueError('Choose a playable video file with a video track.') from exc
+    if not 1 <= duration <= 7200:
+        raise ValueError('Gameplay must be 1 second to 2 hours.')
+    return duration
+
+
 class GameplayLibrary:
     def __init__(self, root):
         self.root=Path(root);self.root.mkdir(parents=True,exist_ok=True)
@@ -19,10 +41,7 @@ class GameplayLibrary:
         path=Path(path)
         m=re.fullmatch(r'gameplay_([0-9a-f]{12})\.(mp4|mov|mkv|webm)',path.name)
         if not m:raise ValueError('Invalid gameplay filename')
-        p=subprocess.run(['ffprobe','-v','error','-show_entries','format=duration','-of','default=nw=1:nk=1',str(path)],capture_output=True,text=True,timeout=30)
-        try:duration=float(p.stdout.strip())
-        except ValueError:raise ValueError('Uploaded file is not a playable video')
-        if not (1<=duration<=7200):raise ValueError('Gameplay must be 1 second to 2 hours')
+        duration=gameplay_duration(path)
         item={'id':m.group(1),'filename':path.name,'tag':re.sub(r'[^a-zA-Z0-9 _-]','',tag)[:45] or 'general','duration':round(duration,2),'uses':0,'cursor':0.0}
         with self.lock:
             d=self._read();d.append(item);self._write(d)

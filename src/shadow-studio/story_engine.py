@@ -1,45 +1,45 @@
-"""Original templates only. Ollama option stays on local machine."""
+"""Free premise expansion and optional local Ollama generation."""
 import os, json, random, re, requests
 from story_presets import STORIES
+from story_expansion import GENRES, expand
 
-def make_story(idea, style="messages", target=45, ending="resolved"):
+def make_story(idea, style="messages", target=45, ending="resolved", *, genre="drama", provider="offline", avoid=()):
     idea = re.sub(r'\s+', ' ',idea).strip()[:350]
     if not idea: raise ValueError('Story idea cannot be empty')
     model = os.getenv('SHADOW_OLLAMA_MODEL','').strip()
-    if model:
+    if genre not in (*GENRES, "random"):
+        raise ValueError('Choose a supported story genre')
+    if provider == "ollama" and not model:
+        raise ValueError('Configure SHADOW_OLLAMA_MODEL to use local AI')
+    if provider == "ollama":
         seconds = min(60, max(15, target))
         low, high = round(seconds * 1.75), round(seconds * 2.2)
         finish = "Close with a natural audience question." if ending == "question" else "End on a concrete outcome."
         prompt = (
             'Write original short fiction for a general audience as JSON with a title and a lines array. '
             'Each line must have a speaker and text. Keep each line under 240 characters. '
-            f'Premise: {idea}. Style: {style}. Use {low} to {high} total spoken words. '
+            f'Premise: {idea}. Preserve every stated premise detail. Genre: {genre}. Style: {style}. Use {low} to {high} total spoken words. '
             'Start with an event that creates a clear question. Escalate with specific details. '
             'Pay off a detail that appeared earlier in the story. Use natural dialogue. '
             f'{finish} Avoid copyrighted characters and real-world accusations.'
         )
         try:
             data = _local_json(model, prompt)
-            lines=[{'speaker':str(x['speaker'])[:24], 'text':str(x['text'])[:240]} for x in data['lines'] if x.get('text')]
-            if len(lines)>=3: return {'title':str(data.get('title') or idea)[:95],'lines':lines[:22],'source':'ollama'}
-        except Exception as e:
-            print('Ollama fallback:',e)
-    # Honest template fallback; it is not presented as AI-generated creative writing.
-    lines=[
-      ('Me',idea[:238].rstrip('.!?')+'.'),
-      ('Friend','Wait. You cannot just drop that and move on.'),
-      ('Me','I thought I was overthinking everything at first.'),
-      ('Friend','So what happened next?'),
-      ('Me','Then I noticed something that completely changed the situation.'),
-      ('Friend','Please tell me you asked someone about it.'),
-      ('Me','I did. And their answer was NOT what I expected.'),
-      ('Friend','There has to be more to this story.'),
-      ('Me','Now I have to decide whether to confront them or walk away.'),
-      ('Friend','What would you do if you were me?')]
-    return {'title':idea[:85].rstrip('.!?')+'... 😳 #Shorts','lines':[{'speaker':a,'text':b} for a,b in lines],'source':'template'}
+            lines = [{'speaker': row['speaker'].strip(), 'text': row['text'].strip()} for row in data['lines']]
+            title = data['title'].strip()
+            if (title and 4 <= len(lines) <= 24
+                and all(0 < len(row['speaker']) <= 24 and 0 < len(row['text']) <= 240 for row in lines)
+                and len({row['speaker'].casefold() for row in lines}) >= 2):
+                return {'title': title[:95], 'lines': lines, 'source': 'ollama', 'genre': genre}
+        except (requests.RequestException, ValueError, TypeError, AttributeError, KeyError):
+            pass
+        raise RuntimeError('Local Ollama could not return a usable conversation. Try again or select Offline expansion.')
+    return expand(idea, genre, target, ending, avoid)
+
 
 def random_story(genre="random", target=45, ending="resolved", previous_title=""):
     """Choose and vary a complete outline with a duration-appropriate number of beats."""
+    genre = {"romance": "drama", "betrayal": "revenge"}.get(genre, genre)
     if genre != "random" and genre not in STORIES:
         raise ValueError("Choose a supported story genre")
     genres = tuple(STORIES) if genre == "random" else (genre,)

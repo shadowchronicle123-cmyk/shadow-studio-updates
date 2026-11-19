@@ -1,9 +1,10 @@
-"""Shadow Studio local production dashboard, v0.26."""
+"""Shadow Studio local production dashboard."""
 import json, os, re, threading, uuid, io, zipfile, hashlib, subprocess, shutil as file_shutil
 from urllib.parse import urlsplit
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from pathlib import Path
+from tempfile import SpooledTemporaryFile
 from typing import Literal
 load_dotenv(Path(__file__).resolve().parent / ".env")
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, BackgroundTasks, Request
@@ -13,18 +14,19 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from story_engine import make_story, metadata, random_story, rewrite_line
 from renderer import line_pause, generate, preview_layout
+from update_manager import VERSION as STUDIO_VERSION
 from audio_mix import line_sound
 from captions import read_captions, as_webvtt
 from voice_engine import VOICES, available_voices, valid_voice, create_voice
 from studio_tools import save_project, list_projects, get_project, clip_media, CLIPS
-from gameplay_library import GameplayLibrary
+from gameplay_library import GameplayLibrary, gameplay_duration
 from split_screen import split_screen
 from video_ranking import rank_videos
 from advanced_tools import scene_candidates, transcribe_local, edit_video, motion_from_image, MEDIA_ROOT
 from quality_check import analyze as quality_analyze
 from approval_security import approved_unchanged, file_digest
 from integration_bridge import router as agent_router, DraftRequest, create_draft as stage_local_draft, list_drafts as staged_drafts
-from cloud_handoff import config as cloud_config, state as cloud_state, upload as cloud_upload, auto_upload as cloud_auto_upload, HandoffError
+from cloud_handoff import config as cloud_config, state as cloud_state, start_upload as cloud_upload, test_connection as cloud_test, auto_upload as cloud_auto_upload, HandoffError
 
 ROOT=Path(__file__).resolve().parent
 OUT=ROOT/'outputs'; OUT.mkdir(exist_ok=True)
@@ -123,14 +125,18 @@ def video_record(jobid):
 @app.get('/api/library/{jobid}/quality')
 def quality_report(jobid: str):
     _, item = video_record(jobid)
-    return {'id':jobid, 'title':item.get('title',''), **quality_analyze(OUT/jobid/'short.mp4')}
+    try:
+        report = quality_analyze(OUT/jobid/'short.mp4')
+    except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise HTTPException(422,'The MP4 could not be inspected. Open it locally or render again before approval.') from exc
+    return {'id':jobid, 'title':item.get('title',''), **report}
 
 @app.patch('/api/library/{jobid}/review')
 def review_video(jobid:str, req:ReviewUpdate, background_tasks: BackgroundTasks):
     if req.status not in VALID_REVIEW:raise HTTPException(400,'Invalid review state')
     path, item=video_record(jobid)
     if req.status=='approved':
-        report=quality_analyze(OUT/jobid/'short.mp4')
+        report=quality_report(jobid)
         if not report['passed']:
             raise HTTPException(409,'Fix video preflight blockers before approval: '+ '; '.join(report['blockers']))
     item['review_status']=req.status
@@ -166,20 +172,50 @@ def drafts_for_owner():
 def cloud_handoff_config():
     try:
         c=cloud_config()
-        return {'configured':c['enabled'],'auto_upload_on_approval':c['enabled'] and c['auto_upload'],
+        return {'configured':c['enabled'],'auto_upload_on_approval':c['enabled'] and c['auto_upload'], 'missing':c['missing'],
                 'instructions':'Private cloud upload only. ChatGPT / vidIQ draft initiation and publishing are separate.'}
     except HandoffError as exc:raise HTTPException(400,str(exc))
 
+@app.post('/api/cloud-handoff/test')
+def cloud_handoff_test():
+    try:
+        return cloud_test()
+    except HandoffError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @app.get('/api/cloud-handoff/{jobid}/status')
 def cloud_handoff_status(jobid:str):
-    try:return cloud_state(jobid)
+    try:return JSONResponse(cloud_state(jobid), headers={'Cache-Control':'no-store'})
     except HandoffError as exc:raise HTTPException(400,str(exc))
 
-@app.post('/api/cloud-handoff/{jobid}')
+@app.post('/api/cloud-handoff/{jobid}', status_code=202)
 def cloud_handoff_send(jobid:str):
     try:return cloud_upload(jobid)
     except HandoffError as exc:
         raise HTTPException(409,str(exc))
+
+def download_archive(archive, filename):
+    archive.seek(0)
+    def chunks():
+        with archive:
+            while chunk := archive.read(1024 * 1024):
+                yield chunk
+    return StreamingResponse(chunks(), media_type='application/zip', headers={
+        'Content-Disposition': f'attachment; filename="{filename}"',
+        'Cache-Control': 'no-store',
+    })
+
+
+def add_approved_video(archive, name, video, expected):
+    digest = hashlib.sha256()
+    with video.open('rb') as source, archive.open(name, 'w') as destination:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+            destination.write(chunk)
+    if digest.hexdigest() != expected:
+        raise HTTPException(409, 'The MP4 changed during packaging. Review and approve the current video.')
+
 
 @app.get('/api/chatgpt-handoff/{jobid}')
 def chatgpt_handoff(jobid: str):
@@ -189,14 +225,14 @@ def chatgpt_handoff(jobid: str):
     """
     _, item = video_record(jobid)
     if not approved_unchanged(item, OUT/jobid/'short.mp4'):
-        raise HTTPException(409, 'Video has changed since approval or has an older unverified approval. Review and approve it again.')
+        raise HTTPException(409, 'Review and approve the current MP4 in Review Library before downloading a publishing kit.')
     video = OUT / jobid / 'short.mp4'
     result = quality_analyze(video)
     if not result['passed']:
         raise HTTPException(409, 'Video failed current technical quality check')
     if video.stat().st_size > 200 * 1024 * 1024:
         raise HTTPException(413, 'MP4 exceeds 200 MB; download video separately')
-    digest=file_digest(video)
+    digest=item['approved_video_sha256']
     captions=OUT/jobid/'captions.srt'
     manifest = {
         'schema':'shadow-studio-handoff/v1', 'id':jobid,
@@ -212,7 +248,7 @@ def chatgpt_handoff(jobid: str):
         'SHADOW STUDIO → CHATGPT + vidIQ HANDOFF\n\n'
         '1. Attach short.mp4 from this ZIP to a ChatGPT conversation.\n'
         '2. Paste REQUEST_FOR_CHATGPT.txt in the same chat.\n'
-        '3. ChatGPT can import the MP4 to vidIQ and prepare a YouTube draft.\n'
+        '3. If vidIQ is connected and accepts the file, request a draft. You can also upload the MP4 manually in YouTube Studio.\n'
         '4. Review exact title, description, video and public/private setting.\n'
         '5. Approve publishing separately; this export is NOT publishing permission.\n'
     )
@@ -224,17 +260,16 @@ def chatgpt_handoff(jobid: str):
         'Show me the draft, including visibility, for final approval. '
         'The approval inside Shadow Studio is NOT authorization to publish publicly.'
     )
-    buffer=io.BytesIO()
-    with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
-        archive.write(video, 'short.mp4')
+    buffer=SpooledTemporaryFile(max_size=8*1024*1024)
+    with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_STORED) as archive:
+        add_approved_video(archive, 'short.mp4', video, digest)
+        archive.writestr('YOUTUBE_METADATA.txt', f"{item.get('title','')}\n\n{item.get('description','')}\n")
         if captions.is_file():archive.write(captions,'captions.srt')
         archive.writestr('handoff.json', json.dumps(manifest,indent=2,ensure_ascii=False))
         archive.writestr('REQUEST_FOR_CHATGPT.txt',request)
         archive.writestr('README_FIRST.txt',instructions)
-    buffer.seek(0)
-    return StreamingResponse(buffer,media_type='application/zip',headers={
-        'Content-Disposition':f'attachment; filename="shadow-chatgpt-handoff-{jobid}.zip"',
-        'Cache-Control':'no-store'})
+    return download_archive(buffer, f'shadow-chatgpt-handoff-{jobid}.zip')
+
 
 @app.get('/api/publishing-kit')
 def publishing_kit():
@@ -250,20 +285,19 @@ def publishing_kit():
         except (ValueError,OSError):continue
     if not approved:raise HTTPException(404,'Approve at least one video in the Library first')
     if len(approved)>20:raise HTTPException(400,'Too many approved videos; please archive older exports')
-    mem=io.BytesIO()
+    mem=SpooledTemporaryFile(max_size=8*1024*1024)
     manifest=[]
-    with zipfile.ZipFile(mem,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=1) as z:
+    with zipfile.ZipFile(mem,'w',compression=zipfile.ZIP_STORED) as z:
         for item,file in sorted(approved,key=lambda x:x[0].get('created_at','')):
             jid=item['id']
-            z.write(file,f'{jid}/short.mp4')
+            add_approved_video(z,f'{jid}/short.mp4',file,item['approved_video_sha256'])
             captionfile=file.parent/'captions.srt'
             if captionfile.is_file():z.write(captionfile,f'{jid}/captions.srt')
             z.writestr(f'{jid}/youtube.txt',f"TITLE: {item.get('title','')}\n\nDESCRIPTION:\n{item.get('description','')}\n")
             manifest.append({'id':jid,'title':item.get('title',''),'review_status':'approved'})
         z.writestr('UPLOAD_CHECKLIST.txt','1. Review every MP4.\n2. Confirm voice and gameplay rights.\n3. Upload approved video in YouTube Studio or vidIQ.\n4. Confirm title, description and visibility.\n5. Publish only after your own final approval.\n')
         z.writestr('manifest.json',json.dumps(manifest,indent=2))
-    mem.seek(0)
-    return StreamingResponse(mem,media_type='application/zip',headers={'Content-Disposition':'attachment; filename="shadow-studio-approved-shorts.zip"'})
+    return download_archive(mem, 'shadow-studio-approved-shorts.zip')
 
 
 STARTER_STORIES=[
@@ -315,6 +349,9 @@ class StoryRequest(BaseModel):
     idea:str=Field(default="",max_length=350)
     previous_title:str=Field(default="",max_length=95)
     genre:str|None=None
+    mode:Literal["custom", "random"]|None=None
+    provider:Literal["offline", "ollama"]="offline"
+    avoid:list[str]=Field(default_factory=list,max_length=12)
     ending:Literal["resolved", "question"]="resolved"
     style:str='messages'
     target:int=45
@@ -324,10 +361,14 @@ class RenderOptions(BaseModel):
     voice:str="en-US-AriaNeural"
     voice_rate:int=Field(default=0,ge=-30,le=30)
     second_voice:str|None=None
+    primary_speaker:str|None=Field(default=None,max_length=24)
     resolution:str="720p"
     gameplay_id:str|None=None
+    gameplay_percent:int=Field(default=58,ge=55,le=60)
+    gameplay_anchor:Literal["top", "center", "bottom"]="center"
     pacing:Literal["snappy", "normal", "deliberate"]="normal"
     captions:bool=True
+    allow_premium:bool=False
     music_name:str|None=None
     voice_volume:int=Field(default=100,ge=25,le=150)
     music_volume:int=Field(default=22,ge=0,le=100)
@@ -344,7 +385,12 @@ def safe_style(s):
 
 @app.get('/',response_class=HTMLResponse)
 def home():
-    return HTML
+    return HTML.replace("__STUDIO_VERSION__", STUDIO_VERSION)
+
+
+@app.get('/studio.css', include_in_schema=False)
+def studio_styles():
+    return FileResponse(ROOT/'studio.css', media_type='text/css')
 
 class ElevenConnectRequest(BaseModel):
     api_key:str=Field(min_length=15,max_length=256)
@@ -425,13 +471,16 @@ def configured_premium_voice():
 def story(req:StoryRequest):
     safe_style(req.style)
     try:
-        if req.genre is not None:
-            return {'story':random_story(req.genre, req.target, req.ending, req.previous_title)}
+        if req.mode == "random" or (req.mode is None and req.genre is not None):
+            return {'story':random_story(req.genre or "random", req.target, req.ending, req.previous_title)}
         if len(req.idea.strip()) < 3:
             raise ValueError('Enter a story idea or choose a genre')
-        return {'story':make_story(req.idea,req.style,req.target,req.ending)}
+        return {'story':make_story(req.idea,req.style,req.target,req.ending,genre=req.genre or 'drama',provider=req.provider,avoid=req.avoid)}
     except ValueError as exc:
         raise HTTPException(400,str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(502,str(exc)) from exc
+
 
 @app.post('/api/upload-background')
 async def upload_background(file:UploadFile=File(...)):
@@ -446,6 +495,10 @@ async def upload_background(file:UploadFile=File(...)):
                 size+=len(chunk)
                 if size>200*1024*1024: raise HTTPException(413,'Background limit is 200 MB')
                 dst.write(chunk)
+        await run_in_threadpool(gameplay_duration,path)
+    except ValueError as exc:
+        path.unlink(missing_ok=True)
+        raise HTTPException(400,str(exc)) from exc
     except Exception:
         path.unlink(missing_ok=True)
         raise
@@ -516,8 +569,10 @@ async def gameplay_upload(file:UploadFile=File(...), tag:str=Form('general')):
                 total+=len(chunk)
                 if total>500*1024*1024:raise HTTPException(413,'Gameplay upload limit is 500MB')
                 out.write(chunk)
-        item=GAMEPLAY.register(target,tag)
-        return item
+        return await run_in_threadpool(GAMEPLAY.register,target,tag)
+    except ValueError as exc:
+        target.unlink(missing_ok=True)
+        raise HTTPException(400,str(exc)) from exc
     except Exception:
         target.unlink(missing_ok=True)
         raise
@@ -525,6 +580,7 @@ async def gameplay_upload(file:UploadFile=File(...), tag:str=Form('general')):
 class VoicePreviewRequest(BaseModel):
     voice:str='en-US-AriaNeural'
     rate:int=Field(default=0,ge=-30,le=30)
+    allow_premium:bool=False
 
 @app.get('/api/voices')
 def voices():
@@ -545,6 +601,7 @@ def voices():
 
 @app.post('/api/voice-preview')
 def voice_preview(req:VoicePreviewRequest):
+    require_voice_consent(req.allow_premium,req.voice)
     if not valid_voice(req.voice):raise HTTPException(400,'Invalid voice')
     # A repeat preview of the same voice and rate should not charge another
     # premium synthesis request. Files are stored only on the owner's machine.
@@ -614,12 +671,25 @@ def story_rewrite_line(req: RewriteLineRequest):
         raise HTTPException(502, str(exc)) from exc
 
 
+def background_file(name):
+    if not re.fullmatch(r'background_[0-9a-f]{12}\.(mp4|mov|mkv|webm)', name):
+        raise HTTPException(400,'Invalid background')
+    path = UPLOADS/name
+    if not path.is_file():
+        raise HTTPException(404,'Background not found. Select the file again.')
+    return path
+
+
 class LayoutPreviewRequest(BaseModel):
     story: dict
     style: Literal["messages", "reddit"] = "messages"
     line_index: int = Field(default=0, ge=0, le=23)
     gameplay_id: str | None = None
     show_gameplay: bool = False
+    background_name: str | None = None
+    resolution: Literal["720p","1080p"] = "720p"
+    gameplay_percent: int = Field(default=58,ge=55,le=60)
+    gameplay_anchor: Literal["top","center","bottom"] = "center"
 
 
 @app.post('/api/layout-preview')
@@ -627,27 +697,31 @@ def layout_preview(req: LayoutPreviewRequest):
     story = clean_render_story(req.story)
     if req.line_index >= len(story['lines']):
         raise HTTPException(400, 'Choose a dialogue line to preview')
-    clip = None
-    if req.gameplay_id:
-        try:
-            if req.gameplay_id != 'auto' or GAMEPLAY.list_clips():
-                clip = GAMEPLAY.pick(req.gameplay_id)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+    if req.background_name and req.gameplay_id:
+        raise HTTPException(400,'Choose a saved clip or a one-time upload.')
+    clip = pick_gameplay(req.gameplay_id)
+    background = background_file(req.background_name) if req.background_name else clip['path'] if clip else None
     try:
         image = preview_layout(
             story, req.line_index, req.style,
-            show_gameplay=bool(clip) or req.show_gameplay,
-            background=clip['path'] if clip else None,
-            start=clip['cursor'] if clip else 0,
+            show_gameplay=bool(background) or req.show_gameplay,
+            background=background,
+            start=clip['cursor'] if clip else 0,resolution=req.resolution,
+            gameplay_percent=req.gameplay_percent,gameplay_anchor=req.gameplay_anchor,
         )
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
         raise HTTPException(422, 'Could not render a layout preview for this gameplay file') from exc
     return Response(image, media_type='image/png', headers={'Cache-Control': 'no-store'})
 
 
+def require_voice_consent(allowed, *voices):
+    if not allowed and any(voice and voice.startswith('elevenlabs:') for voice in voices):
+        raise HTTPException(409, 'Confirm ElevenLabs credit usage before using this voice.')
+
+
 def render_settings(req):
     safe_style(req.style)
+    require_voice_consent(req.allow_premium,req.voice,req.second_voice)
     if req.resolution not in ('720p','1080p'): raise HTTPException(400,'Choose 720p or 1080p')
     if not valid_voice(req.voice):raise HTTPException(400,'Invalid voice')
     if req.second_voice and not valid_voice(req.second_voice):raise HTTPException(400,'Invalid second voice')
@@ -662,7 +736,8 @@ def render_settings(req):
         'style': req.style, 'voice': req.voice, 'second_voice': req.second_voice,
         'voice_rate': req.voice_rate, 'resolution': req.resolution, 'pacing': req.pacing,
         'captions': req.captions, 'music': music, 'voice_volume': req.voice_volume,
-        'music_volume': req.music_volume, 'target_seconds': req.target_seconds,
+        'music_volume': req.music_volume, 'target_seconds': req.target_seconds, 'gameplay_percent': req.gameplay_percent,
+        'gameplay_anchor': req.gameplay_anchor, 'primary_speaker':req.primary_speaker,
     }
 
 
@@ -680,15 +755,15 @@ def render(req:RenderRequest):
     settings = render_settings(req)
     story = clean_render_story(req.story)
     title, clean = story['title'], story['lines']
+    if req.primary_speaker and req.primary_speaker.strip().casefold() not in {row['speaker'].casefold() for row in clean}:
+        raise HTTPException(400, 'Choose a main voice speaker who appears in this conversation.')
     background=None
     if req.background_name and req.gameplay_id:raise HTTPException(400,'Choose a gameplay library clip or a one-time upload, not both')
     selected_gameplay = pick_gameplay(req.gameplay_id)
     if selected_gameplay:
         background = selected_gameplay['path']
     if req.background_name:
-        if not re.fullmatch(r'background_[0-9a-f]{12}\.(mp4|mov|mkv|webm)',req.background_name):raise HTTPException(400,'Invalid background')
-        background=UPLOADS/req.background_name
-        if not background.is_file():raise HTTPException(404,'Background not found')
+        background = background_file(req.background_name)
     with lock:
         if active['id'] and jobs.get(active['id'],{}).get('state')=='running':raise HTTPException(409,'A video is already rendering')
         jobid=uuid.uuid4().hex[:12]
@@ -749,13 +824,18 @@ def video(jobid:str):
 
 class ProjectRequest(BaseModel):
     title:str='Untitled'
+    idea:str=Field(default='',max_length=350)
+    provider:Literal["offline","ollama"]="offline"
     lines:list[dict]
     style:str='messages'
     voice:str='en-US-AriaNeural'
     voice_rate:int=0
     second_voice:str|None=None
+    primary_speaker:str|None=Field(default=None,max_length=24)
     resolution:str='720p'
     gameplay_id:str|None=None
+    gameplay_percent:int=Field(default=58,ge=55,le=60)
+    gameplay_anchor:Literal["top", "center", "bottom"]="center"
     pacing:Literal["snappy", "normal", "deliberate"]="normal"
     captions:bool=True
     music_name:str|None=None
@@ -781,9 +861,11 @@ def project_get(projectid:str):
 
 @app.get('/api/jobs')
 def all_jobs():
-    with lock:return {'jobs':sorted((dict(x) for x in jobs.values()),key=lambda d:d['id'],reverse=True)[:50]}
+    with lock:return {'jobs':[dict(jobs[jobid]) for jobid in list(jobs)[-50:][::-1]]}
 
 class BatchRequest(RenderOptions):
+    genre: Literal["random","horror","drama","romance","betrayal","revenge","mystery","comedy"] = "drama"
+    provider: Literal["offline","ollama"] = "offline"
     ideas: list[str] = Field(min_length=1, max_length=8)
     target: int = 45
     ending: Literal["resolved", "question"] = "resolved"
@@ -795,13 +877,14 @@ class ReadyBatchRequest(RenderOptions):
 
 class RandomBatchRequest(RenderOptions):
     count: int = Field(default=3, ge=1, le=8)
-    genre: Literal["random", "horror", "drama", "revenge", "mystery", "comedy"] = "random"
+    genre: Literal["random", "horror", "drama", "romance", "betrayal", "revenge", "mystery", "comedy"] = "random"
     target: int = 45
     ending: Literal["resolved", "question"] = "resolved"
 
 
 def start_batch(req, values, build_story, title):
     settings = render_settings(req)
+    settings['primary_speaker'] = None
     if req.gameplay_id and req.gameplay_id != 'auto':
         pick_gameplay(req.gameplay_id)
     with lock:
@@ -868,7 +951,7 @@ def batch_render(req: BatchRequest):
     ideas = [idea.strip() for idea in req.ideas]
     if any(not 3 <= len(idea) <= 350 for idea in ideas):
         raise HTTPException(400, 'Each story idea must have 3 to 350 characters')
-    return start_batch(req, ideas, lambda idea, _: make_story(idea, req.style, req.target, req.ending), 'Idea batch')
+    return start_batch(req, ideas, lambda idea, _: make_story(idea, req.style, req.target, req.ending,genre=req.genre,provider=req.provider), 'Idea batch')
 
 
 @app.post('/api/batch-ready')
@@ -1162,104 +1245,20 @@ def capabilities():
             'ai_video_generation':'not yet implemented', 'publishing':'approved upload kit and token-protected local drafts',
             'chatgpt':'owner token-protected agent API available when configured; direct ChatGPT connector not installed'}
 
-HTML=r'''<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Shadow Studio — Private</title><style>
-:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#e9eef9;background:#090d16}*{box-sizing:border-box}body{margin:0}header{padding:23px max(20px,calc((100vw - 1100px)/2));border-bottom:1px solid #293043;background:#101624}h1{margin:0;font-size:26px}header p{margin:5px 0 0;color:#9fabbd}.tag{color:#8dc8ff;font-size:12px;font-weight:700}main{max-width:1100px;margin:28px auto;padding:0 18px;display:grid;grid-template-columns:1fr 1fr;gap:24px}.panel{background:#131b2b;border:1px solid #303b50;border-radius:16px;padding:22px}h2{font-size:18px;margin:0 0 18px}label{display:block;color:#aebbd1;font-size:13px;margin:14px 0 7px}textarea,input,select{width:100%;color:#f2f7ff;background:#0b1120;border:1px solid #374760;border-radius:9px;padding:12px;font:inherit}textarea{min-height:92px;resize:vertical}button,.button{background:#4d90ee;color:#fff;border:0;border-radius:9px;padding:12px 16px;font:inherit;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block}button:disabled{opacity:.5;cursor:not-allowed}.subtle{background:#263b5e}.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:15px}.muted{color:#aab8ce;font-size:13px;line-height:1.55}.line{display:flex;gap:8px;margin:9px 0}.line input:first-child{width:100px;flex-shrink:0}.line input:nth-child(2){flex:1}.line button{background:#3a2635;padding:8px}#lines{max-height:430px;overflow:auto}#status{margin-top:16px;color:#b9cfff}progress{width:100%;height:12px;margin-top:12px}video{width:100%;max-height:540px;background:#000;border-radius:10px}#videoSection{display:none}#editor{display:none}.help{background:#172238;border-left:3px solid #5e9cff;padding:10px 14px;border-radius:6px;margin-top:16px}header{background:radial-gradient(circle at 95% 10%,#203765 0%,#101624 45%);border-bottom:1px solid #334562}header .tag{letter-spacing:.12em}header h1{font-size:31px;letter-spacing:-.04em}nav{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px}nav a{font-size:13px;font-weight:650;color:#d9eaff;text-decoration:none;padding:9px 14px;border:1px solid #354663;border-radius:100px;background:#1c2b45}nav a:hover{background:#365b93}.panel{box-shadow:0 12px 32px #05091524}button:hover:not(:disabled),.button:hover{filter:brightness(1.14)}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,a:focus-visible{outline:2px solid #9bc6ff;outline-offset:2px}.library-panel{max-width:1100px;margin:0 auto 25px}.section-head{display:flex;align-items:start;justify-content:space-between;gap:14px;flex-wrap:wrap}.eyebrow{font-size:11px;font-weight:750;color:#88bfff;letter-spacing:.16em}.library-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;margin-top:16px}.video-tile{background:linear-gradient(145deg,#263e68,#111b32);text-align:left;border:1px solid #35537e;min-height:148px;display:flex;flex-direction:column;align-items:flex-start;justify-content:space-between;gap:8px}.video-tile strong{font-size:14px;line-height:1.4}.video-tile small{font-size:12px;color:#aebfda}.tile-icon{font-size:26px}.video-tile:hover{border-color:#86bfff}#libraryDetails{margin-top:24px;padding-top:22px;border-top:1px solid #34415a;max-width:540px}#libraryDetails[hidden]{display:none}#libraryDetails h3{font-size:16px} @media(max-width:760px){
- main{grid-template-columns:minmax(0,1fr);margin:12px auto;gap:14px;padding:0 12px}
- header{padding:18px 14px}header h1{font-size:26px}nav{gap:7px;margin-top:16px}
- nav a{font-size:12px;padding:9px 11px}.panel{padding:16px;border-radius:14px}
- .line{flex-wrap:wrap;padding:8px 0;border-bottom:1px solid #304057}
- .line input:first-child{width:33%;flex:1}.line input:nth-child(2){width:100%;flex:auto;order:2}
- .line button{margin-left:auto;order:1}.row button{flex:1;min-width:130px}
- .library-panel,#automation-panel{margin-left:12px!important;margin-right:12px!important}
- .library-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
- .video-tile{min-height:135px;padding:12px}.video-tile strong{font-size:12px}
- .section-head{align-items:stretch}#videoSection video,#libraryPlayer{max-height:68vh}
- textarea,input,select{font-size:16px}body{overflow-x:hidden}
-}
-@media(max-width:380px){.library-grid{grid-template-columns:1fr}header h1{font-size:24px}}
-.voice-note{font-size:12px;color:#9cd4ff;margin-top:8px}
-#renderBtn{background:linear-gradient(110deg,#4e94f5,#8067ff)}
-[data-view-panel][hidden]{display:none!important}
-nav .tab{font-size:13px;font-weight:700;background:#1d2940;color:#bbcae1;border:1px solid #34455f;border-radius:11px;padding:11px 17px}
-nav .tab.active{background:#4e8cf1;color:#fff;border-color:#79acff}
-nav .tab:hover{background:#35527e}
-.assist-panel{width:calc(100% - 28px)}
-main[data-view-panel="create"]{align-items:start}
-@media(max-width:760px){nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}nav .tab{font-size:12px;padding:13px 8px} .assist-panel{width:calc(100% - 24px);margin-left:12px!important;margin-right:12px!important}}
-/* v0.11 focused production styling */
-body{background:radial-gradient(circle at 12% -4%,#192f55 0%,transparent 34%),#090d16}
-header{padding-top:30px;padding-bottom:25px;background:linear-gradient(105deg,#141c31 0%,#142741 55%,#101726 100%)}
-header h1{font-size:34px;letter-spacing:-.045em}
-.panel{background:linear-gradient(155deg,#162239,#111a2b);border-color:#33445e;box-shadow:0 14px 45px #0003}
-nav{gap:8px}nav .tab{border-radius:12px}
-button,.button{transition:transform .16s ease,filter .16s ease}button:hover:not(:disabled){transform:translateY(-1px)}
-#libraryGrid .video-tile{background:linear-gradient(155deg,#263b65,#121d34);border-radius:14px}
-#libraryDetails{background:#0c1424;padding:18px;border:1px solid #314158;border-radius:14px}
-@media(max-width:760px){header h1{font-size:27px}}
-.split-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:700px){.split-grid{grid-template-columns:1fr}}
-
-/* ShadowChronicles brand system: midnight black, merlot, crimson and soft ivory. */
-:root{color-scheme:dark;background:#08080b;color:#f7eef1;--ink:#08080b;--panel:#151016;--panel2:#1d131c;--line:#38232c;--accent:#bd264c;--accent2:#e14366;--muted:#ac969e;--glow:rgba(191,33,74,.16)}
-body{background:radial-gradient(ellipse 70% 28% at 90% 0%,#38111e 0%,transparent 75%),#08080b;color:#f7eef1}
-header{background:linear-gradient(105deg,rgba(12,9,13,.96),rgba(40,11,22,.95))!important;border-bottom:1px solid #592638!important;position:relative;overflow:hidden;padding-top:27px;padding-bottom:22px}
-header:after{content:'';position:absolute;right:-60px;top:-140px;width:420px;height:420px;border-radius:50%;border:1px solid rgba(217,52,92,.22);box-shadow:0 0 0 45px rgba(167,29,66,.035),0 0 0 90px rgba(167,29,66,.025);pointer-events:none}
-.brandrow{display:flex;align-items:center;gap:18px;position:relative;z-index:1}.brandmark{width:78px;height:78px;border-radius:16px;object-fit:cover;object-position:center;border:1px solid #693044;box-shadow:0 10px 30px #0009}.brandrow h1{font-size:clamp(27px,4vw,40px);letter-spacing:-.035em;line-height:1.1;font-weight:850}.brandrow h1 span{color:#e65379}.brandtag{letter-spacing:.34em!important;font-size:10px!important;color:#ba7e90!important;margin:10px 0 0!important}header>.tag{color:#d1849a!important;font-size:10px!important;letter-spacing:.21em}
-header>p{max-width:560px;margin-top:17px!important;color:#bbaab0!important;font-size:13px}
-nav{z-index:1;position:relative}nav .tab{background:#1a1119!important;border:1px solid #3e2731!important;color:#c5b1ba!important;border-radius:10px!important;transition:all .2s}nav .tab.active{background:linear-gradient(115deg,#aa1e45,#cf3159)!important;color:#fff!important;border-color:#dc4e70!important;box-shadow:0 6px 20px #ac204633}nav .tab:hover{background:#4b1d30!important}
-.panel,.tool-card{background:linear-gradient(160deg,#1b141b,#100e13)!important;border:1px solid #3d2732!important;box-shadow:0 12px 35px #0006!important;border-radius:18px}
-h2{letter-spacing:-.025em;font-weight:760}h3{letter-spacing:-.017em}
-.eyebrow,.tag{color:#dc6b8c!important}.muted,.voice-note{color:#b9a4ae!important}
-input,textarea,select{background:#100e13!important;border:1px solid #553341!important;color:#f5edf1!important;border-radius:10px}input:focus,textarea:focus,select:focus{border-color:#d83b68!important;outline:2px solid #e44d7740!important;outline-offset:1px}
-button,.button{background:linear-gradient(125deg,#a61d45,#d3335e)!important;color:white!important;border:1px solid #d34469!important;box-shadow:0 4px 14px #9d1d3830}button.subtle,.subtle{background:#33202b!important;border:1px solid #5a3544!important;box-shadow:none}
-button:hover:not(:disabled),.button:hover{filter:brightness(1.16)}.help{background:#261721!important;border-left:3px solid #b82b52!important;color:#ead7df!important}
-.video-tile{background:linear-gradient(145deg,#452032,#190f19)!important;border:1px solid #653249!important}.video-tile:hover{border-color:#e25279!important}.video-tile small{color:#bca8b1!important}
-#renderBtn{background:linear-gradient(120deg,#a91942,#ed426b)!important}
-progress{accent-color:#d1325b}a{color:#ef7d9b}a.button{color:white}
-.tool-intro{padding-bottom:18px}.tool-intro h2{font-size:29px;margin:8px 0}.studio-tool-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.tool-card{padding:20px;min-width:0}.tool-card h3{font-size:17px;margin:5px 0}.tool-symbol{font-size:30px;color:#ea6386}.tool-feedback{font-size:12px;color:#f0bed0;margin-top:13px;white-space:pre-wrap;overflow-wrap:anywhere}.tool-feedback video{max-height:300px;margin-top:12px}.mini-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.checkboxline{display:flex;align-items:center;gap:10px}.checkboxline input{width:auto}.tool-card>button{margin-top:14px}.integration-roadmap{display:flex;justify-content:space-between;align-items:center;gap:18px;background:#210f1a;border:1px dashed #78415a;padding:22px;border-radius:16px;margin:20px 0 28px}.integration-roadmap h3{margin:6px 0}.roadmap-pill{font-size:10px;letter-spacing:.13em;font-weight:850;border:1px solid #8c5470;background:#3c2433;color:#efc0d1;border-radius:100px;padding:8px 12px;white-space:nowrap}
-@media(max-width:760px){.brandmark{width:54px;height:54px}.brandrow{gap:12px}.brandrow h1{font-size:26px}.studio-tool-grid{grid-template-columns:1fr}.integration-roadmap{flex-direction:column;align-items:start}nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:10px}nav .tab{flex-shrink:0;font-size:12px!important}}
-
-/* v0.21 — Crimson Pro shell: polished visual system, preserved existing tools. */
-:root{--base:#09090d;--card:#17131a;--card2:#1d1720;--stroke:#332630;--rose:#e94c76;--soft:#cbb6be;--white:#fbf5f7;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-html{scroll-behavior:smooth}body{min-height:100vh;background:radial-gradient(ellipse 55% 32% at 91% -4%,#341522 0,transparent 76%),#0a090d!important;color:var(--white);line-height:1.5}
-header{width:248px;min-height:100vh;position:fixed!important;top:0;left:0;z-index:9;overflow-y:auto!important;overflow-x:hidden!important;padding:29px 19px!important;border-right:1px solid #382932!important;border-bottom:0!important;background:linear-gradient(180deg,#1a1119,#0d0b10 65%)!important;box-shadow:12px 0 54px #0003}
-header:after{opacity:.27;right:-220px;top:15px}
-header .tag{font-size:9px;line-height:1.7;letter-spacing:.12em;color:#d97d98!important;opacity:.95}
-.brandrow{gap:10px;margin-top:21px;align-items:center}.brandmark{width:50px!important;height:50px!important;border-radius:13px!important;flex-shrink:0;box-shadow:0 6px 24px #ab1c433a}.brandrow h1{font-size:22px!important;line-height:1.05!important;letter-spacing:-.07em!important}.brandtag{font-size:9px!important;letter-spacing:.19em!important}
-header>p{font-size:12px!important;line-height:1.65;color:#a58f99!important;margin:20px 2px 26px!important}
-nav{display:flex!important;flex-direction:column;gap:8px!important;margin-top:18px!important}nav .tab{width:100%;min-height:46px;text-align:left;padding:12px 13px!important;font-size:12px!important;font-weight:650!important;white-space:normal!important;background:transparent!important;box-shadow:none!important;border-color:transparent!important;color:#b9a5af!important}nav .tab.active{background:linear-gradient(100deg,#671c36,#a3274d)!important;border:1px solid #ad3758!important;color:#fff!important;box-shadow:inset 3px 0 #ff648c,0 7px 20px #0005!important}nav .tab:hover:not(.active){background:#2a1b27!important}
-main[data-view-panel="create"]{margin:0 0 0 248px!important;max-width:none!important;padding:36px clamp(22px,4.3vw,70px) 65px!important;gap:21px!important;grid-template-columns:minmax(0,1.15fr) minmax(330px,.85fr)!important}
-body>section[data-view-panel],body>div[data-view-panel]{margin-left:calc(248px + clamp(22px,4.3vw,70px))!important;margin-right:clamp(22px,4.3vw,70px)!important;max-width:none!important;width:auto!important}
-.panel,.tool-card{background:linear-gradient(157deg,#1b151d,#100e13)!important;border:1px solid #392b34!important;border-radius:19px!important;box-shadow:0 15px 50px #0004!important;padding:25px!important}
-.panel h2{font-size:20px;letter-spacing:-.04em;margin-bottom:14px}h3{letter-spacing:-.035em}
-label{font-size:12px!important;font-weight:680!important;color:#c6b1ba!important;margin-top:19px!important}
-input,select,textarea{border:1px solid #493341!important;background:#120f15!important;border-radius:11px!important;padding:13px 14px!important;color:#faf5f8!important}textarea{line-height:1.55}
-button,.button{border-radius:11px!important;font-size:13px!important;letter-spacing:.003em;padding:12px 16px!important;box-shadow:0 6px 20px #9f18412b!important}button.subtle{background:#2c202c!important;border-color:#4d3541!important}
-button:focus-visible,a:focus-visible{outline:2px solid #ff9ab5!important;outline-offset:3px}
-.help{border-radius:11px!important;background:#261923!important;border:1px solid #49313e!important;border-left:3px solid #d53b68!important;padding:17px!important}
-.muted{color:#b3a1a9!important;font-size:12.5px!important}.eyebrow{font-size:10px!important;font-weight:850;letter-spacing:.2em}.row{gap:10px}.line input:nth-child(2){min-width:0}
-#videoSection video,#libraryPlayer,video{border:1px solid #4c3341;border-radius:15px!important;max-height:68vh;background:#030304}
-#libraryGrid .video-tile{background:linear-gradient(145deg,#321b2b,#171019)!important;border:1px solid #523448!important;min-height:165px;transition:transform .18s,border .18s}#libraryGrid .video-tile:hover{transform:translateY(-3px);border-color:#ef7098!important}
-.tool-card{padding:22px!important}.tool-symbol{font-size:28px!important}.studio-tool-grid{gap:16px!important}
-.launch-hero{grid-column:1/-1;border:1px solid #553345;border-radius:22px;background:radial-gradient(circle at 90% 15%,#61213d 0,transparent 40%),linear-gradient(125deg,#261521,#130e16 65%);padding:28px 31px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:24px;align-items:center;position:relative;overflow:hidden;box-shadow:0 19px 57px #0006}
-.launch-hero:after{content:"";pointer-events:none;position:absolute;width:240px;height:240px;border-radius:50%;border:1px solid #b73e6a30;top:-135px;right:-45px;box-shadow:0 0 0 48px #b73e6a10,0 0 0 95px #b73e6a08}
-.launch-hero h2{font-size:clamp(25px,3.25vw,38px);line-height:1.12;letter-spacing:-.06em;margin:9px 0 12px}.launch-hero p{font-size:13px;line-height:1.8;color:#c6abb7;max-width:620px;margin:0}.launch-hero .hero-actions{display:flex;gap:9px;flex-wrap:wrap;justify-content:flex-end;z-index:1}
-.launch-metrics{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.metric{padding:17px 19px;border:1px solid #372630;background:#151118;border-radius:15px}.metric strong{font-size:27px;line-height:1.1;display:block;letter-spacing:-.055em;margin-top:5px}.metric span{color:#bdabb4;font-size:11px;letter-spacing:.03em}.metric small{display:block;color:#9b8a92;font-size:11px;margin-top:6px}
-.launch-checks{grid-column:1/-1;background:#151118;border:1px solid #3a2833;border-radius:15px;padding:17px 20px;display:none}.launch-checks.show{display:block}.launch-checks h3{margin:0 0 10px;font-size:14px}.check-chip{display:inline-flex;align-items:center;gap:8px;border:1px solid #473440;border-radius:9px;padding:8px 11px;margin:5px 7px 5px 0;font-size:11px}.check-chip.ok{color:#aee7bf;border-color:#355643}.check-chip.no{color:#ffb4be;border-color:#69364a}
-@media(max-width:1100px){header{width:210px}main[data-view-panel="create"]{margin-left:210px!important;grid-template-columns:1fr!important;padding:25px!important}body>section[data-view-panel],body>div[data-view-panel]{margin-left:235px!important;margin-right:25px!important}.launch-hero{grid-template-columns:1fr}.launch-hero .hero-actions{justify-content:flex-start}}
-@media(max-width:760px){header{width:100%!important;min-height:auto!important;position:relative!important;padding:17px 16px 12px!important;border-right:none!important;border-bottom:1px solid #452a39!important}.brandrow{margin-top:9px}.brandmark{width:43px!important;height:43px!important}.brandrow h1{font-size:22px!important}header .tag{font-size:9px}header>p{margin:10px 0!important;font-size:11px!important}nav{display:flex!important;flex-direction:row;flex-wrap:nowrap!important;gap:7px!important;overflow-x:auto!important;margin:12px -4px 0!important;padding:0 4px 9px!important;scrollbar-width:thin}nav .tab{width:auto!important;min-height:39px;flex-shrink:0;white-space:nowrap!important;text-align:center;padding:10px 11px!important;font-size:11px!important}main[data-view-panel="create"]{margin-left:0!important;padding:17px 13px 40px!important;gap:13px!important}body>section[data-view-panel],body>div[data-view-panel]{margin:0 13px 25px!important;width:auto!important}.panel,.tool-card{padding:18px!important;border-radius:15px!important}.launch-hero{padding:22px 18px;gap:13px;border-radius:16px}.launch-hero h2{font-size:28px}.launch-metrics{gap:8px}.metric{padding:13px 10px}.metric strong{font-size:22px}.metric small{font-size:10px}.studio-tool-grid{grid-template-columns:1fr!important}}
-@media(max-width:400px){.launch-metrics{grid-template-columns:1fr 1fr}.metric:last-child{grid-column:1/-1}.row button{min-width:110px}}
-@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
-.integration-health-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:18px}.integration-health-card{background:linear-gradient(145deg,#20121d,#111019);border:1px solid #614056;border-radius:14px;padding:16px}.integration-health-card h3{font-size:14px;margin:0 0 10px;color:#fff}.integration-health-card p{font-size:12px;color:#d5b6c2;line-height:1.5}.integration-health-card small{font-size:12px;color:#cf8ca3}.integration-health-state{font-size:11px;color:#f9c7d8;font-weight:750;letter-spacing:.04em}.caption-review>div{max-height:230px;overflow:auto;display:grid;gap:6px;margin-top:9px}
-.caption-review button{background:#223047;text-align:left;line-height:1.4;font-weight:500}
-.caption-review time{color:#9ec0eb;margin-right:10px;font-variant-numeric:tabular-nums}
-.line .line-order{display:flex;gap:4px}
-.line .line-order button{margin:0}
-.layout-preview img{display:block;width:min(100%,290px);margin:12px auto;border-radius:12px}
-.layout-preview img[hidden]{display:none}
-.ollama-rewrite{display:none}
-.ollama-available .ollama-rewrite{display:inline-block}
-</style></head><body>
-<header><div class="tag">SHADOWCHRONICLES • PRIVATE WORKSPACE • v0.41</div><div class="brandrow"><img src="/brand-logo" alt="ShadowChronicles logo" class="brandmark"><div><h1>SHADOW <span>STUDIO</span></h1><p class="brandtag">THE CONTENT ENGINE</p></div></div><p>Your creative command center. Draft, produce, review and prepare Shorts — all in one place.</p><nav aria-label="Workspace sections"><button type="button" class="tab active" data-view="create" onclick="switchView('create')">✦ &nbsp; Create</button><button type="button" class="tab" data-view="library" onclick="switchView('library')">▣ &nbsp; Review library</button><button type="button" class="tab" data-view="automation" onclick="switchView('automation')">◷ &nbsp; Automation</button><button type="button" class="tab" data-view="tools" onclick="switchView('tools')">◈ &nbsp; Tools & Editor</button><button type="button" class="tab" data-view="assistant" onclick="switchView('assistant')">↗ &nbsp; Publishing</button></nav></header><main data-view-panel="create"><section class="launch-hero" aria-label="Production overview"><div><span class="eyebrow">SHADOWCHRONICLES / CREATOR DESK</span><h2>Make something<br><span style="color:#fc6993">worth watching.</span></h2><p>Everything you need to produce your next short-form story: original scripts, natural voices, your gameplay, and a controlled review-to-publishing workflow.</p></div><div class="hero-actions"><button type="button" onclick="document.getElementById('idea').focus()">+ New story</button><button type="button" class="subtle" onclick="switchView('library')">Review videos →</button></div></section><div class="launch-metrics"><div class="metric"><span>RENDERED SHORTS</span><strong id="metricRendered">—</strong><small>Stored on this computer</small></div><div class="metric"><span>APPROVED</span><strong id="metricApproved">—</strong><small>Passed review checks</small></div><div class="metric"><span>AWAITING REVIEW</span><strong id="metricPending">—</strong><small>Ready for your decision</small></div></div><section class="launch-checks" id="launchChecks"><h3>Production system check</h3><div id="launchCheckItems" aria-live="polite"></div><p class="muted" id="launchCheckNote"></p><button class="subtle" onclick="checkProductionReadiness()">↻ Run checks again</button></section><section class="panel" id="create-panel"><span class="eyebrow">01 / STORY WORKSHOP</span><h2>Create your story</h2><div class="help"><strong>Quick start — three ready-to-edit originals</strong><p class="muted">Want to upload multiple Shorts tonight? Load a complete story below, preview a neural voice, then render.</p><div id="starterList" class="row"></div></div><label for="idea">Story idea</label><textarea id="idea">My friend sent me a screenshot that changed everything about my relationship</textarea><label for="style">Video style</label><select id="style"><option value="messages">Animated text message story</option><option value="reddit">Reddit-style story</option></select><label for="target">Target story length (approximate)</label><select id="target"><option value="30">30 seconds</option><option value="45" selected>45 seconds</option><option value="60">60 seconds</option></select><label for="genre">Genre for random stories</label><select id="genre"><option value="random">Random</option><option value="horror">Horror</option><option value="drama">Drama</option><option value="revenge">Revenge</option><option value="mystery">Mystery</option><option value="comedy">Comedy</option></select><label for="ending">Generated story ending</label><select id="ending"><option value="resolved">Story resolution</option><option value="question">Resolution + audience question</option></select><div class="row"><button onclick="createStory()" id="storyBtn">Generate from idea</button><button class="subtle" onclick="createStory(true)" id="randomStoryBtn">Custom Generate</button><button onclick="quickGenerate()" id="quickBtn">Quick Generate a video</button></div><p class="muted">Random stories remix original offline outlines. Generate from idea uses local Ollama when configured, with a template fallback. Actual video length depends on the voice and pauses.</p><div id="editor"><h2>2. Review & edit script</h2><label for="title">Video title</label><input id="title" maxlength="95"><div id="lines"></div><button class="subtle" onclick="addLine()">+ Add dialogue line</button><div class="row"><button class="subtle" onclick="saveProject()">Save project</button><button class="subtle" onclick="refreshProjects()">Refresh saved projects</button></div><label>Saved projects</label><select id="projects" onchange="loadProject()"><option value="">Choose a project...</option></select></div></section><section class="panel" id="production-panel"><span class="eyebrow">02 / PRODUCTION SETTINGS</span><h2>Produce your video</h2><label for="voice">Narrator voice</label><select id="voice"><option value="en-US-AriaNeural">Aria — conversational woman (US)</option><option value="en-US-JennyNeural">Jenny — friendly woman (US)</option><option value="en-US-MichelleNeural">Michelle — warm woman (US)</option><option value="en-US-GuyNeural">Guy — storyteller man (US)</option><option value="en-US-DavisNeural">Davis — deeper man (US)</option><option value="en-US-ChristopherNeural">Christopher — announcer man (US)</option><option value="en-GB-SoniaNeural">Sonia — woman (British)</option><option value="en-GB-RyanNeural">Ryan — man (British)</option><option value="windows-default">Windows voice — offline fallback</option></select><p class="muted">For free tests, select Aria, Jenny, or Michelle and preview before rendering. Matilda is your preferred vidIQ voice, but does not automatically transfer to this local app. An authorized ElevenLabs API key is required for premium voices; those requests may be billed separately.</p><label for="secondVoice">Second character voice</label><select id="secondVoice"><option value="en-US-GuyNeural">Guy — storyteller man (US)</option><option value="en-US-DavisNeural">Davis — deeper man (US)</option><option value="en-US-JennyNeural">Jenny — friendly woman (US)</option><option value="en-US-AriaNeural">Aria — conversational woman (US)</option></select><p class="muted">The first speaker uses the main voice; every other speaker uses this second voice. Choose the same voice only if you want identical narration.</p><label for="voiceRate">Speaking speed</label><select id="voiceRate"><option value="-15">Slower</option><option value="0" selected>Normal</option><option value="10">A little faster</option><option value="20">Fast</option></select><div class="row"><button class="subtle" id="previewVoiceBtn" onclick="previewVoice()">▶ Preview main voice</button><button class="subtle" onclick="previewVoice(true)">▶ Preview second voice</button></div><audio id="voicePreview" controls preload="none" style="display:none;width:100%;margin-top:12px"></audio><div class="voice-note" id="voiceAvailability">Voice studio: loading...</div><p class="muted">Natural voices are the default and require internet. If a natural voice is unavailable, the render stops with an error instead of silently switching to a robotic voice. Always preview before rendering.</p><label class="checkboxline"><input type="checkbox" id="fitDuration" checked>Fit to target length by adjusting automatic gaps</label><label for="pacing">Dialogue pacing</label><select id="pacing"><option value="snappy">Snappy</option><option value="normal" selected>Normal</option><option value="deliberate">Deliberate</option></select><label class="checkboxline"><input type="checkbox" id="exportCaptions" checked>Export separate timed captions (.srt)</label><details class="help"><summary>Music and sound effects</summary><label for="musicTrack">Background music</label><select id="musicTrack"><option value="">No music</option></select><label for="musicFile">Import licensed audio</label><input id="musicFile" type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac"><label class="checkboxline"><input type="checkbox" id="musicLicensed">I have permission to use this track in my videos</label><button type="button" class="subtle" onclick="importMusic()">Import track</button><p class="muted" id="musicStatus" role="status"></p><label for="voiceVolume">Voice level (%)</label><input id="voiceVolume" type="number" min="25" max="150" value="100"><label for="musicVolume">Music level (%)</label><input id="musicVolume" type="number" min="0" max="100" value="22"><p class="muted">Music lowers during speech. Add a message sound, impact, or transition to any dialogue line.</p></details><label for="resolution">Export resolution (30 FPS)</label><select id="resolution"><option value="720p" selected>720 × 1280 — faster</option><option value="1080p">1080 × 1920 — sharper export</option></select><p class="muted">Current designs are drawn at 540 × 960 and upscaled, so 1080p does not add source detail.</p><label for="gameplayChoice">Gameplay library (only clips you own or may use)</label><select id="gameplayChoice"><option value="">No saved gameplay</option><option value="auto">Automatic — rotate saved clips</option></select><div class="row"><button class="subtle" onclick="refreshGameplay()">Refresh gameplay library</button></div><label for="gameplayFile">Add gameplay to library</label><input id="gameplayFile" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska"><label for="gameplayTag">Game or category</label><input id="gameplayTag" placeholder="Minecraft parkour, GTA driving, etc."><div class="row"><button class="subtle" onclick="saveGameplay()" id="gameplaySave">Save gameplay</button></div><p class="muted" id="gameplayStatus">Saved footage is kept on this PC and reused across Shorts. Dialogue appears above gameplay, which fills the lower 58% of the video.</p><label for="background">Or upload gameplay for just this video</label><input id="background" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska"><p class="muted">Leave both blank for the original dark story layout. Saved footage takes priority over the one-time upload.</p><div class="row"><button onclick="showLayoutPreview(0)" id="layoutBtn" type="button" class="subtle">Preview layout</button><button onclick="renderVideo()" id="renderBtn" disabled>Render MP4</button></div><section class="help layout-preview" id="layoutPreview" hidden><div class="row"><button onclick="showLayoutPreview(-1)" id="layoutPrevious" type="button" class="subtle">Previous line</button><button onclick="showLayoutPreview(1)" id="layoutNext" type="button" class="subtle">Next line</button></div><p id="layoutStatus" class="muted" role="status"></p><img id="layoutImage" alt="Vertical dialogue layout preview" hidden></section><div id="status">Generate a script to get started.</div><progress id="progress" max="100" value="0" style="display:none"></progress><div id="videoSection"><h2>4. Preview & download</h2><video id="preview" controls playsinline></video><details id="previewCaptionReview" class="help caption-review" hidden><summary>Review caption timing</summary><div></div></details><div class="row"><a class="button" id="download" download>Download MP4</a><a class="button subtle" id="downloadCaptions" download>Download timed captions</a></div><label for="description">YouTube description (copy after reviewing)</label><textarea id="description" rows="7" readonly></textarea><div class="row"><button class="subtle" onclick="navigator.clipboard.writeText(document.getElementById('description').value)">Copy description</button></div><div class="help muted">Publishing requires separate approval. Inspect the finished video and upload it to YouTube Studio, or use your connected vidIQ workflow after approval.</div></div><div class="help muted" id="health">Checking FFmpeg...</div></section></main><section class="panel" id="integration-center" data-view-panel="assistant" hidden style="max-width:1000px;margin:24px auto"><span class="eyebrow">CONNECTIVITY / PRIVATE BETA</span><h2>Integration health center</h2><p class="muted">See which tools are configured, then run a read-only connection test. No keys are shown, no credits are used, no files are sent and nothing gets published. A green connection does not guarantee successful generation.</p><div class="row"><button type="button" class="subtle" onclick="refreshIntegrationStatus(false)">Refresh setup</button><button type="button" onclick="refreshIntegrationStatus(true)">Test provider connections</button></div><div id="integrationStatus" class="integration-health-grid" role="status" aria-live="polite">Checking available integrations…</div><section class="help" style="margin-top:18px"><h3>Connect ElevenLabs</h3><p class="muted">Use your own ElevenLabs API key. We verify it with ElevenLabs first, then store it only in the local .env file. Previewing or rendering premium narration may consume ElevenLabs credits.</p><label for="elevenKey">ElevenLabs API key</label><input id="elevenKey" type="password" autocomplete="off" placeholder="Paste your ElevenLabs API key"><button type="button" onclick="connectElevenLabs()">Connect ElevenLabs</button><div class="row"><select id="elevenVoices" aria-label="ElevenLabs voice"><option value="">Connect account to list voices</option></select><button type="button" class="subtle" onclick="saveElevenVoice()">Use selected voice</button></div><p id="elevenFeedback" class="muted">Not tested with your account yet.</p></section><section class="help" style="margin-top:18px"><h3>App Updates</h3><p class="muted">Check for verified updates without downloading a ZIP manually. Configure SHADOW_UPDATE_FEED once in .env; close the app and run update_windows.bat to install. Your work stays on this PC.</p><button type="button" class="subtle" onclick="checkShadowUpdates()">Check for updates</button><p id="shadowUpdateStatus" class="muted">Update source not yet checked.</p></section></section><section class="panel library-panel" id="library-panel" data-view-panel="library"><div class="section-head"><div><span class="eyebrow">YOUR WORKSPACE</span><h2>Review Queue & Video Library</h2><p class="muted">Review videos, approve the ones you want to publish, and download an upload kit containing MP4s and descriptions.</p></div><button class="subtle" onclick="refreshLibrary()">↻ Refresh library</button></div><div id="libraryEmpty" class="muted">Loading your completed videos…</div><div id="libraryGrid" class="library-grid"></div><div class="row"><a class="button" href="/api/publishing-kit" download>↓ Download approved upload kit</a></div><div id="libraryDetails" hidden><h3 id="libraryTitle"></h3><video id="libraryPlayer" controls playsinline preload="metadata"></video><details id="libraryCaptionReview" class="help caption-review" hidden><summary>Review caption timing</summary><div></div></details><label for="reviewState">Review decision</label><select id="reviewState"><option value="needs_review">Needs review</option><option value="needs_changes">Needs changes</option><option value="approved">Approved for upload kit</option></select><label for="reviewNotes">Review notes</label><textarea id="reviewNotes" rows="2" placeholder="Optional notes before publishing..."></textarea><div class="row"><button class="subtle" onclick="runQualityCheck()">Run video quality check</button><button id="saveReviewBtn" onclick="saveReview()">Save review decision</button></div><div class="help" id="qualityPanel" role="status">Before approving, run a technical check. A passing check does not replace watching the complete video.</div><p class="muted" id="reviewFeedback">Approval only adds the video to your upload kit. Nothing is sent to YouTube.</p><label for="libraryDescription">YouTube description</label><textarea id="libraryDescription" readonly rows="5"></textarea><div class="row"><a id="libraryDownload" class="button" download>Download video</a><a id="subtitleDownload" class="button subtle" download hidden>↓ Download captions (.srt)</a><a id="handoffDownload" class="button" download>↓ ChatGPT + vidIQ handoff ZIP</a><button class="subtle" id="cloudHandoffBtn" onclick="createCloudHandoff()">☁ Generate private video link</button><button class="subtle" onclick="navigator.clipboard.writeText(el('libraryDescription').value)">Copy description</button></div><div id="cloudHandoffResult" class="help muted" hidden></div></div></section><section class="panel" data-view-panel="tools" id="split-panel" style="max-width:860px;margin:24px auto" hidden>
+HTML=r'''<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Shadow Studio — Private</title><link rel="stylesheet" href="/studio.css"></head><body>
+<header><div class="brandrow"><img src="/brand-logo" alt="" class="brandmark"><h1>Shadow Studio</h1></div><nav aria-label="Workspace">
+<button type="button" class="tab active" data-view="create" onclick="switchView('create')">Create</button>
+<button type="button" class="tab" data-view="library" onclick="switchView('library')">Review Library</button>
+<button type="button" class="tab" data-view="automation" onclick="switchView('automation')">Render Queue</button>
+<button type="button" class="tab" data-view="assistant" onclick="switchView('assistant')">Publishing</button>
+<button type="button" class="tab" data-view="tools" onclick="switchView('tools')">Media Tools</button>
+<button type="button" class="tab" data-view="settings" onclick="switchView('settings')">Settings</button>
+</nav><span class="version">v__STUDIO_VERSION__</span></header>
+<main data-view-panel="create">
+<div class="workspace-head"><div><h2>Create a Short</h2><p>Write the conversation, frame your video, then render it for review.</p></div>
+<div class="launch-metrics" aria-label="Video library totals"><div class="metric"><strong id="metricRendered">—</strong><span>Rendered</span></div><div class="metric"><strong id="metricPending">—</strong><span>To review</span></div><div class="metric"><strong id="metricApproved">—</strong><span>Approved</span></div></div></div>
+<div class="workspace"><div><div class="stage-bar" aria-label="Production stages"><button type="button" data-stage="story" aria-current="step" onclick="showStage('story')">Story</button><button type="button" data-stage="setup" onclick="showStage('setup')">Voice &amp; gameplay</button></div>
+<section class="panel" id="create-panel"><div class="section-head"><h2>Story</h2><div><label for="projects">Open saved project</label><select id="projects" onchange="loadProject()"><option value="">Choose a project…</option></select></div></div><details class="help"><summary>Start with a finished example</summary><div id="starterList" class="row"></div></details><label for="idea">Story idea</label><textarea id="idea" maxlength="350" placeholder="My girlfriend invited her ex to our wedding."></textarea><div class="mini-grid"><div><label for="style">Video style</label><select id="style"><option value="messages">Animated text message story</option><option value="reddit">Reddit-style story</option></select></div><div><label for="target">Target story length</label><select id="target"><option value="30">30 seconds</option><option value="45" selected>45 seconds</option><option value="60">60 seconds</option></select></div><div><label for="genre">Story genre</label><select id="genre"><option value="random">Random</option><option value="horror">Horror</option><option value="drama">Drama</option><option value="romance">Romance</option><option value="betrayal">Betrayal</option><option value="revenge">Revenge</option><option value="mystery">Mystery</option><option value="comedy">Comedy</option></select></div><div><label for="storyProvider">Custom story engine</label><select id="storyProvider"><option value="offline">Offline expansion · free</option><option value="ollama">Ollama · local AI (optional)</option></select></div></div><label for="ending">Ending</label><select id="ending"><option value="resolved">Story resolution</option><option value="question">Resolution + audience question</option></select><div class="row"><button onclick="createStory()" id="storyBtn">Generate story</button><button type="button" id="regenerateBtn" class="subtle" onclick="createStory()" disabled>Regenerate</button><button class="subtle" onclick="createStory(true)" id="randomStoryBtn">Generate random story</button><button onclick="quickGenerate()" id="quickBtn">Quick render</button></div><p class="muted">Offline expansion uses authored plot branches. Local Ollama is optional and needs a model on this PC.</p><div id="editor"><h3>Dialogue</h3><label for="title">Video title</label><input id="title" maxlength="95"><div id="lines"></div><button class="subtle" onclick="addLine()">+ Add dialogue line</button><div class="row"><button class="subtle" onclick="saveProject()">Save project</button><button type="button" onclick="showStage('setup')">Continue to video setup</button></div></div></section><section class="panel" id="production-panel" hidden><h2>Voice &amp; gameplay</h2><label for="voice">Narrator voice</label><select id="voice"><option value="en-US-AriaNeural">Aria — conversational woman (US)</option><option value="en-US-JennyNeural">Jenny — friendly woman (US)</option><option value="en-US-MichelleNeural">Michelle — warm woman (US)</option><option value="en-US-GuyNeural">Guy — storyteller man (US)</option><option value="en-US-DavisNeural">Davis — deeper man (US)</option><option value="en-US-ChristopherNeural">Christopher — announcer man (US)</option><option value="en-GB-SoniaNeural">Sonia — woman (British)</option><option value="en-GB-RyanNeural">Ryan — man (British)</option><option value="windows-default">Windows voice — offline fallback</option></select><p class="muted">Preview each voice before rendering. ElevenLabs voices can use credits.</p><label for="secondVoice">Second character voice</label><select id="secondVoice"><option value="en-US-GuyNeural">Guy — storyteller man (US)</option><option value="en-US-DavisNeural">Davis — deeper man (US)</option><option value="en-US-JennyNeural">Jenny — friendly woman (US)</option><option value="en-US-AriaNeural">Aria — conversational woman (US)</option></select><p class="muted">Other speakers use the second voice.</p><label for="primarySpeaker">Assign main voice</label><select id="primarySpeaker"><option value="">First speaker automatically</option></select><label for="voiceRate">Speaking speed</label><select id="voiceRate"><option value="-15">Slower</option><option value="0" selected>Normal</option><option value="10">A little faster</option><option value="20">Fast</option></select><div class="row"><button class="subtle" id="previewVoiceBtn" onclick="previewVoice()">▶ Preview main voice</button><button class="subtle" onclick="previewVoice(true)">▶ Preview second voice</button></div><audio id="voicePreview" controls preload="none" style="display:none;width:100%;margin-top:12px"></audio><div class="voice-note" id="voiceAvailability">Voice studio: loading...</div><p class="muted">Natural voices are the default and require internet. If a natural voice is unavailable, the render stops with an error instead of silently switching to a robotic voice. Always preview before rendering.</p><label class="checkboxline"><input type="checkbox" id="fitDuration" checked>Fit to target length by adjusting automatic gaps</label><label for="pacing">Dialogue pacing</label><select id="pacing"><option value="snappy">Snappy</option><option value="normal" selected>Normal</option><option value="deliberate">Deliberate</option></select><label class="checkboxline"><input type="checkbox" id="exportCaptions" checked>Export separate timed captions (.srt)</label><details class="help"><summary>Music and sound effects</summary><label for="musicTrack">Background music</label><select id="musicTrack"><option value="">No music</option></select><label for="musicFile">Import licensed audio</label><input id="musicFile" type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac"><label class="checkboxline"><input type="checkbox" id="musicLicensed">I have permission to use this track in my videos</label><button type="button" class="subtle" onclick="importMusic()">Import track</button><p class="muted" id="musicStatus" role="status"></p><label for="voiceVolume">Voice level (%)</label><input id="voiceVolume" type="number" min="25" max="150" value="100"><label for="musicVolume">Music level (%)</label><input id="musicVolume" type="number" min="0" max="100" value="22"><p class="muted">Music lowers during speech. Add a message sound, impact, or transition to any dialogue line.</p></details><label for="resolution">Export resolution (30 FPS)</label><select id="resolution"><option value="1080p" selected>1080 × 1920</option><option value="720p">720 × 1280 · faster</option></select><label for="gameplayChoice">Gameplay library (only clips you own or may use)</label><select id="gameplayChoice"><option value="">No saved gameplay</option><option value="auto">Automatic — rotate saved clips</option></select><div class="row"><button class="subtle" onclick="refreshGameplay()">Refresh gameplay library</button></div><div class="mini-grid"><div><label for="gameplayPercent">Gameplay height</label><select id="gameplayPercent"><option value="55">55%</option><option value="58" selected>58%</option><option value="60">60%</option></select></div><div><label for="gameplayAnchor">Gameplay crop</label><select id="gameplayAnchor"><option value="center">Center</option><option value="top">Top</option><option value="bottom">Bottom</option></select></div></div><label for="gameplayFile">Add gameplay to library</label><input id="gameplayFile" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska"><label for="gameplayTag">Game or category</label><input id="gameplayTag" placeholder="Minecraft parkour, GTA driving, etc."><div class="row"><button class="subtle" onclick="saveGameplay()" id="gameplaySave">Save gameplay</button></div><p class="muted" id="gameplayStatus">Saved footage is kept on this PC and reused across Shorts. Dialogue appears above gameplay, which fills the lower 58% of the video.</p><label for="background">Or upload gameplay for just this video</label><input id="background" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska"><p class="muted">Leave both blank for the original dark story layout. Saved footage takes priority over the one-time upload.</p></section></div><aside class="panel monitor" aria-label="Video preview"><div class="section-head"><h2>Preview</h2><span class="eyebrow">Vertical video</span></div><div class="row"><button onclick="showLayoutPreview(0)" id="layoutBtn" type="button" class="subtle">Preview layout</button><button onclick="renderVideo()" id="renderBtn" disabled>Render MP4</button></div><div id="status" role="status">Enter an idea to begin.</div><progress id="progress" max="100" value="0" style="display:none" aria-label="Render progress"></progress><div class="canvas"><div id="emptyMonitor">Generate a story to preview its layout here.</div><section class="help layout-preview" id="layoutPreview" hidden><div class="row"><button onclick="showLayoutPreview(-1)" id="layoutPrevious" type="button" class="subtle">Previous line</button><button onclick="showLayoutPreview(1)" id="layoutNext" type="button" class="subtle">Next line</button></div><p id="layoutStatus" class="muted" role="status"></p><img id="layoutImage" alt="Vertical dialogue layout preview" hidden></section><div id="videoSection"><video id="preview" controls playsinline></video><details id="previewCaptionReview" class="help caption-review" hidden><summary>Review caption timing</summary><div></div></details><div class="row"><a class="button" id="download" download>Download MP4</a><button type="button" onclick="reviewExport()">Review export</button><a class="button subtle" id="downloadCaptions" download>Download timed captions</a></div><label for="description">YouTube description (copy after reviewing)</label><textarea id="description" rows="7" readonly></textarea><div class="row"><button class="subtle" onclick="navigator.clipboard.writeText(document.getElementById('description').value)">Copy description</button></div></div></div></aside></div></main><section class="panel" id="integration-center" data-view-panel="settings" hidden style="max-width:1000px;margin:24px auto"><h2>Settings &amp; connections</h2><div id="health" class="muted"></div><details class="launch-checks" id="launchChecks"><summary>Render readiness</summary><div id="launchCheckItems" aria-live="polite"></div><p class="muted" id="launchCheckNote"></p><button class="subtle" onclick="checkProductionReadiness()">Run checks again</button></details><p class="muted">See which tools are configured, then run a read-only connection test. No keys are shown, no credits are used, no files are sent and nothing gets published. A green connection does not guarantee successful generation.</p><div class="row"><button type="button" class="subtle" onclick="refreshIntegrationStatus(false)">Refresh setup</button><button type="button" onclick="refreshIntegrationStatus(true)">Test provider connections</button></div><div id="integrationStatus" class="integration-health-grid" role="status" aria-live="polite">Checking available integrations…</div><section class="help" style="margin-top:18px"><h3>Connect ElevenLabs</h3><p class="muted">Use your own ElevenLabs API key. We verify it with ElevenLabs first, then store it only in the local .env file. Previewing or rendering premium narration may consume ElevenLabs credits.</p><label for="elevenKey">ElevenLabs API key</label><input id="elevenKey" type="password" autocomplete="off" placeholder="Paste your ElevenLabs API key"><button type="button" onclick="connectElevenLabs()">Connect ElevenLabs</button><div class="row"><select id="elevenVoices" aria-label="ElevenLabs voice"><option value="">Connect account to list voices</option></select><button type="button" class="subtle" onclick="saveElevenVoice()">Use selected voice</button></div><p id="elevenFeedback" class="muted">Not tested with your account yet.</p></section><section class="help" style="margin-top:18px"><h3>Private storage</h3><p class="muted">A publishing kit works on this PC. Optional S3-compatible storage creates a temporary link you can give to a supported uploader.</p><div id="handoffDiagnostics" role="status"></div><div class="row"><button type="button" class="subtle" onclick="checkHandoff(false)">Check configuration</button><button type="button" class="subtle" onclick="checkHandoff(true)">Test connection</button></div></section><section class="help" style="margin-top:18px"><h3>App Updates</h3><p class="muted">Check for verified updates without downloading a ZIP manually. Configure SHADOW_UPDATE_FEED once in .env; close the app and run update_windows.bat to install. Your work stays on this PC.</p><button type="button" class="subtle" onclick="checkShadowUpdates()">Check for updates</button><p id="shadowUpdateStatus" class="muted">Update source not yet checked.</p></section></section><section class="panel library-panel" id="library-panel" data-view-panel="library"><div class="section-head"><div><span class="eyebrow">YOUR WORKSPACE</span><h2>Review Queue & Video Library</h2><p class="muted">Review videos, approve the ones you want to publish, and download an upload kit containing MP4s and descriptions.</p></div><button class="subtle" onclick="refreshLibrary()">↻ Refresh library</button></div><div id="libraryEmpty" class="muted">Loading your completed videos…</div><div id="libraryGrid" class="library-grid"></div><div class="row"><a class="button" href="/api/publishing-kit" download>↓ Download approved upload kit</a></div><div id="libraryDetails" hidden><h3 id="libraryTitle"></h3><video id="libraryPlayer" controls playsinline preload="metadata"></video><details id="libraryCaptionReview" class="help caption-review" hidden><summary>Review caption timing</summary><div></div></details><label for="reviewState">Review decision</label><select id="reviewState"><option value="needs_review">Needs review</option><option value="needs_changes">Needs changes</option><option value="approved">Approved for upload kit</option></select><label for="reviewNotes">Review notes</label><textarea id="reviewNotes" rows="2" placeholder="Optional notes before publishing..."></textarea><div class="row"><button class="subtle" onclick="runQualityCheck()">Run video quality check</button><button id="saveReviewBtn" onclick="saveReview()">Save review decision</button></div><div class="help" id="qualityPanel" role="status">Before approving, run a technical check. A passing check does not replace watching the complete video.</div><p class="muted" id="reviewFeedback">Approval only adds the video to your upload kit. Nothing is sent to YouTube.</p><label for="libraryDescription">YouTube description</label><textarea id="libraryDescription" readonly rows="5"></textarea><div class="row"><a id="libraryDownload" class="button" download>Download video</a><a id="subtitleDownload" class="button subtle" download hidden>↓ Download captions (.srt)</a><a id="handoffDownload" class="button" download>Download publishing kit</a><button class="subtle" id="cloudHandoffBtn" onclick="createCloudHandoff()">Create private link</button><button class="subtle" onclick="navigator.clipboard.writeText(el('libraryDescription').value)">Copy description</button></div><div id="cloudHandoffResult" class="help muted" role="status" hidden></div><p id="handoffNext" class="muted"></p></div></section><section class="panel" data-view-panel="tools" id="split-panel" style="max-width:860px;margin:24px auto" hidden>
 
 <div class="tool-intro"><span class="eyebrow">PRODUCTION SUITE / 04</span><h2>Cut. Caption. Create.</h2><p class="muted">A focused set of real tools for your own clips. Upload a source once per tool; every export remains on your computer. AI features that require extra engines are clearly labeled.</p></div>
 <div class="studio-tool-grid">
@@ -1287,7 +1286,7 @@ button:focus-visible,a:focus-visible{outline:2px solid #ff9ab5!important;outline
 <label for="rankSeconds">Seconds per ranked clip</label><select id="rankSeconds"><option value="3">3 seconds</option><option value="4" selected>4 seconds</option><option value="6">6 seconds</option><option value="8">8 seconds</option></select>
 <div class="row"><button id="rankButton" onclick="makeRanking()">Create ranked Short</button></div><p class="muted" id="rankStatus">Waiting for clips.</p>
 <div id="rankResult" hidden><video id="rankPlayer" controls playsinline preload="metadata"></video><div class="row"><a id="rankDownload" class="button" download>Download ranking MP4</a></div></div>
-</section><section class="panel" id="automation-panel" data-view-panel="automation" style="max-width:1100px;margin:0 auto 30px"><h2>5. Automation & Media Tools</h2><p class="muted">Queue up to eight Shorts with the production settings from Create. Finished videos go to Review Library.</p><label for="batchCount">Number of random stories</label><input type="number" id="batchCount" value="3" min="1" max="8"><button id="randomBatchBtn" onclick="startRandomBatch()" type="button">Queue random stories</button><label>Batch story ideas — one idea per line</label><textarea id="batchIdeas" placeholder="My friend found a secret note...&#10;The wedding invitation had the wrong name..." rows="4"></textarea><div class="help"><strong>Tonight’s quick production: three complete original stories</strong><p class="muted">Use three complete starter scripts with your current voices, gameplay, captions, pacing and music.</p><button id="readyBatchBtn" onclick="startReadyBatch()">▶ Render all 3 ready stories</button></div><div class="row"><button onclick="startBatch()" id="batchBtn">Generate batch</button><button class="subtle" onclick="refreshJobs()">Refresh jobs</button></div><div id="batchStatus" class="muted"></div><div id="jobList"></div><hr style="border:0;border-top:1px solid #303b50;margin:26px 0"><h2 id="clipper-panel">6. Basic video clipper</h2><p class="muted">Trim a video you own or have permission to use. This is a manual clipper, not AI highlight detection.</p><label>Source video</label><input type="file" id="clipFile" accept="video/*"><label for="clipUrl">Or public YouTube / Twitch URL</label><input type="url" id="clipUrl" placeholder="https://clips.twitch.tv/..."><label class="muted"><input type="checkbox" id="clipRights" style="width:auto"> I have the right to use this footage</label><div class="row"><div><label>Start second</label><input type="number" id="clipStart" min="0" step="0.1" value="0"></div><div><label>End second</label><input type="number" id="clipEnd" min="0.1" step="0.1" value="30"></div></div><div class="row"><button onclick="createClip()" id="clipBtn">Make vertical clip</button></div><div id="clipStatus" class="muted"></div><div id="clipLink"></div><div class="help muted">Nothing is uploaded to YouTube automatically. Videos need your approval and a connected publishing integration.</div></section><section class="panel assist-panel" data-view-panel="assistant" id="assistant-panel" style="max-width:1100px;margin:0 auto 30px"><span class="eyebrow">OWNER APPROVAL</span><h2>ChatGPT + YouTube handoff</h2><p class="muted">Use ChatGPT to improve stories, write titles and descriptions, and prepare publishing drafts. With private storage configured, Shadow Studio can upload approved videos automatically and prepare a direct import link for ChatGPT + vidIQ. Final draft approval and publishing are always separate.</p><label for="assistTitle">Video title</label><input id="assistTitle" placeholder="Choose a finished video from Library, or enter a title"><label for="assistDesc">Description</label><textarea id="assistDesc" placeholder="Paste or edit the video description"></textarea><label for="assistNotes">What should ChatGPT help with?</label><select id="assistNotes"><option value="Review this video and improve its title, description, and hook">Review and optimize</option><option value="Prepare a YouTube Shorts publishing draft for ShadowChronicles and show it to me for approval">Prepare publishing draft</option><option value="Suggest improvements to the next three episodes">Plan follow-up stories</option></select><div class="row"><button onclick="copyAssistantRequest()">Copy request for ChatGPT</button><button class="subtle" onclick="switchView('library')">Choose video from Library</button></div><div class="help muted" id="assistStatus">To send a completed MP4 to ChatGPT, attach the downloaded file in your chat after copying the request. A separate read-only private MCP connector is included in v0.20. It must be configured and connected from ChatGPT on web; it does not send messages into this conversation automatically.</div><div class="help"><strong>New: video handoff to ChatGPT + vidIQ</strong><p>Open a completed video in Library, run its quality check, and mark it approved. Download its ChatGPT + vidIQ handoff ZIP, then attach the MP4 and paste the included request into this chat. ChatGPT can prepare a publishing draft; publishing still requires a separate approval.</p><p class="muted">Optional private link handoff: configure S3-compatible storage in .env, then approve a video and click Generate private video link. Or enable auto-upload on approval. No tokens are included in any exported package.</p></div><h3 style="margin-top:26px">Bring a ChatGPT story into Shadow Studio</h3><p class="muted">Ask ChatGPT to write a story as JSON using this format: <code>{"title":"...","lines":[{"speaker":"Me","text":"..."}]}</code>. Paste its response here, then import the editable dialogue into Create.</p><textarea id="assistantImport" placeholder='{"title":"My shocking story","lines":[{"speaker":"Me","text":"You won’t believe this..."}]}'></textarea><div class="row"><button class="subtle" onclick="importAssistantStory()">Import story JSON</button></div><h3 style="margin-top:26px">Publishing draft queue</h3><p class="muted">Select a finished video in Library, approve it after the quality check, then return here to stage its title and description. Nothing will upload to YouTube.</p><label for="draftVideoId">Approved video ID</label><input id="draftVideoId" placeholder="Choose a video in Library first" readonly><label for="draftPrivacy">Desired YouTube visibility</label><select id="draftPrivacy"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public — still a draft only</option></select><div class="row"><button onclick="stagePublishingDraft()">Save publishing draft</button><button class="subtle" onclick="refreshPublishingDrafts()">Refresh drafts</button></div><div class="help" id="draftFeedback">Drafts are stored locally; no platform account is connected.</div><div id="draftQueue" class="muted"></div><h3 style="margin-top:26px">Publishing safety</h3><p class="muted">Draft → Review → Explicit approval → Publish using your connected YouTube/vidIQ service. No auto-publication or stored YouTube credentials in this release.</p></section><script>
+</section><section class="panel" id="automation-panel" data-view-panel="automation" style="max-width:1100px;margin:0 auto 30px"><h2>5. Automation & Media Tools</h2><p class="muted">Queue up to eight Shorts with the production settings from Create. Finished videos go to Review Library.</p><label for="batchCount">Number of random stories</label><input type="number" id="batchCount" value="3" min="1" max="8"><button id="randomBatchBtn" onclick="startRandomBatch()" type="button">Queue random stories</button><label>Batch story ideas — one idea per line</label><textarea id="batchIdeas" placeholder="My friend found a secret note...&#10;The wedding invitation had the wrong name..." rows="4"></textarea><div class="help"><strong>Tonight’s quick production: three complete original stories</strong><p class="muted">Use three complete starter scripts with your current voices, gameplay, captions, pacing and music.</p><button id="readyBatchBtn" onclick="startReadyBatch()">▶ Render all 3 ready stories</button></div><div class="row"><button onclick="startBatch()" id="batchBtn">Generate batch</button><button class="subtle" onclick="refreshJobs()">Refresh jobs</button></div><div id="batchStatus" class="muted"></div><div id="jobList"></div><hr style="border:0;border-top:1px solid #303b50;margin:26px 0"><h2 id="clipper-panel">6. Basic video clipper</h2><p class="muted">Trim a video you own or have permission to use. This is a manual clipper, not AI highlight detection.</p><label>Source video</label><input type="file" id="clipFile" accept="video/*"><label for="clipUrl">Or public YouTube / Twitch URL</label><input type="url" id="clipUrl" placeholder="https://clips.twitch.tv/..."><label class="muted"><input type="checkbox" id="clipRights" style="width:auto"> I have the right to use this footage</label><div class="row"><div><label>Start second</label><input type="number" id="clipStart" min="0" step="0.1" value="0"></div><div><label>End second</label><input type="number" id="clipEnd" min="0.1" step="0.1" value="30"></div></div><div class="row"><button onclick="createClip()" id="clipBtn">Make vertical clip</button></div><div id="clipStatus" class="muted"></div><div id="clipLink"></div><div class="help muted">Nothing is uploaded to YouTube automatically. Videos need your approval and a connected publishing integration.</div></section><section class="panel assist-panel" data-view-panel="assistant" id="assistant-panel" style="max-width:1100px;margin:0 auto 30px"><span class="eyebrow">OWNER APPROVAL</span><h2>ChatGPT + YouTube handoff</h2><p class="muted">Start with an approved video from Review Library. Download the publishing kit and upload in YouTube Studio, or use a connected tool that can prepare a draft. Confirm visibility and publish in that service.</p><label for="assistTitle">Video title</label><input id="assistTitle" placeholder="Choose a finished video from Library, or enter a title"><label for="assistDesc">Description</label><textarea id="assistDesc" placeholder="Paste or edit the video description"></textarea><label for="assistNotes">What should ChatGPT help with?</label><select id="assistNotes"><option value="Review this video and improve its title, description, and hook">Review and optimize</option><option value="Prepare a YouTube Shorts publishing draft for ShadowChronicles and show it to me for approval">Prepare publishing draft</option><option value="Suggest improvements to the next three episodes">Plan follow-up stories</option></select><div class="row"><a class="button" href="https://studio.youtube.com/" target="_blank" rel="noopener noreferrer">Open YouTube Studio</a><button onclick="copyAssistantRequest()">Copy request for ChatGPT</button><button class="subtle" onclick="switchView('library')">Choose video from Library</button></div><div class="help muted" id="assistStatus">To send a completed MP4 to ChatGPT, attach the downloaded file in your chat after copying the request. A separate read-only private MCP connector is included in v0.20. It must be configured and connected from ChatGPT on web; it does not send messages into this conversation automatically.</div><div class="help"><strong>Download and upload workflow</strong><p>Open a completed video in Library, run its quality check, and mark it approved. Download the publishing kit for the MP4, captions when available, and the title and description. Use YouTube Studio or a connected uploader.</p><p class="muted">Optional private link handoff: configure S3-compatible storage in .env, then approve a video and click Generate private video link. Or enable auto-upload on approval. No tokens are included in any exported package.</p></div><h3 style="margin-top:26px">Bring a ChatGPT story into Shadow Studio</h3><p class="muted">Ask ChatGPT to write a story as JSON using this format: <code>{"title":"...","lines":[{"speaker":"Me","text":"..."}]}</code>. Paste its response here, then import the editable dialogue into Create.</p><textarea id="assistantImport" placeholder='{"title":"My shocking story","lines":[{"speaker":"Me","text":"You won’t believe this..."}]}'></textarea><div class="row"><button class="subtle" onclick="importAssistantStory()">Import story JSON</button></div><h3 style="margin-top:26px">Publishing draft queue</h3><p class="muted">Select a finished video in Library, approve it after the quality check, then return here to stage its title and description. Nothing will upload to YouTube.</p><label for="draftVideoId">Approved video ID</label><input id="draftVideoId" placeholder="Choose a video in Library first" readonly><label for="draftPrivacy">Desired YouTube visibility</label><select id="draftPrivacy"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public — still a draft only</option></select><div class="row"><button onclick="stagePublishingDraft()">Save publishing draft</button><button class="subtle" onclick="refreshPublishingDrafts()">Refresh drafts</button></div><div class="help" id="draftFeedback">Drafts are stored locally; no platform account is connected.</div><div id="draftQueue" class="muted"></div><h3 style="margin-top:26px">Publishing safety</h3><p class="muted">Draft → Review → Explicit approval → Publish using your connected YouTube/vidIQ service. No auto-publication or stored YouTube credentials in this release.</p></section><script>
 
 
 
@@ -1335,6 +1334,24 @@ async function makeRanking(){
  }catch(e){status.textContent='Ranking error: '+e.message}finally{btn.disabled=false}
 }
 
+function showStage(stage){
+ if(stage==='setup')refreshSpeakerSlots();
+ el('create-panel').hidden=stage!=='story';
+ el('production-panel').hidden=stage!=='setup';
+ for(const tab of document.querySelectorAll('[data-stage]')){
+  if(tab.dataset.stage===stage)tab.setAttribute('aria-current','step');
+  else tab.removeAttribute('aria-current');
+ }
+}
+let latestExportId=null;
+async function reviewExport(){
+ if(!latestExportId)return;
+ try{
+  const item=await api('/api/library/'+latestExportId);
+  await refreshLibrary();
+  switchView('library');openLibraryItem(item);
+ }catch(error){setStatus(error.message)}
+}
 function switchView(view){
  for(const section of document.querySelectorAll('[data-view-panel]'))section.hidden=section.dataset.viewPanel!==view;
  for(const tab of document.querySelectorAll('nav .tab')){const selected=tab.dataset.view===view;tab.classList.toggle('active',selected);tab.setAttribute('aria-current',selected?'page':'false')}
@@ -1351,7 +1368,7 @@ async function copyAssistantRequest(){
 function importAssistantStory(){
  try{
   const data=JSON.parse(el('assistantImport').value);
-  if(!data||typeof data.title!=='string'||!Array.isArray(data.lines)||data.lines.length<1||data.lines.length>40||data.title.length>95)throw Error('Use a title and 1–40 dialogue lines');
+  if(!data||typeof data.title!=='string'||!Array.isArray(data.lines)||data.lines.length<2||data.lines.length>24||data.title.length>95)throw Error('Use a title and 2–24 dialogue lines');
   for(const l of data.lines){if(typeof l.speaker!=='string'||!l.speaker.trim()||l.speaker.length>24||typeof l.text!=='string'||!l.text.trim()||l.text.length>240)throw Error('Each line needs a speaker (max 24) and text (max 240)')}
   el('title').value=data.title;el('lines').replaceChildren();data.lines.forEach(l=>addLine(l.speaker,l.text,l.pause_before));
   el('editor').style.display='block';el('renderBtn').disabled=false;
@@ -1362,7 +1379,16 @@ async function refreshGameplay(){try{let r=await api('/api/gameplay');let sel=el
 async function saveGameplay(){let f=el('gameplayFile').files[0];if(!f){el('gameplayStatus').textContent='Select a video first.';return}el('gameplaySave').disabled=true;try{let fd=new FormData();fd.append('file',f);fd.append('tag',el('gameplayTag').value||'general');el('gameplayStatus').textContent='Uploading footage...';let r=await api('/api/gameplay',{method:'POST',body:fd});await refreshGameplay();el('gameplayChoice').value=r.id;el('gameplayStatus').textContent=`Saved ${r.tag} (${Math.round(r.duration)}s). Selected for next render.`}catch(e){el('gameplayStatus').textContent='Upload error: '+e.message}finally{el('gameplaySave').disabled=false}}
 
 let story=null;const el=id=>document.getElementById(id);const setStatus=s=>el('status').textContent=s;
-async function api(path,options){const r=await fetch(path,options);let d=await r.json();if(!r.ok)throw Error(d.detail||'Request failed');return d}
+async function api(path,options){
+ const response=await fetch(path,options);
+ const body=await response.json().catch(()=>null);
+ if(!response.ok){
+  const detail=body?.detail;
+  const message=Array.isArray(detail)?detail.map(entry=>entry.msg).join(' · '):detail;
+  throw Error(message||('Request failed ('+response.status+'). Try again.'));
+ }
+ return body;
+}
 async function loadStarter(i){
  try{
   const d=await api('/api/starter-stories');const x=d.stories[i];if(!x)throw Error('Not found');
@@ -1372,21 +1398,28 @@ async function loadStarter(i){
  }catch(e){setStatus('Starter story error: '+e.message)}
 }
 async function showStarters(){try{let d=await api('/api/starter-stories');const box=el('starterList');box.replaceChildren();d.stories.forEach((v,i)=>{const b=document.createElement('button');b.className='subtle';b.textContent='Load story '+(i+1);b.title=v.title;b.onclick=()=>loadStarter(i);box.append(b)});}catch(e){}}
+const premiseVariants=new Map();
 async function createStory(random=false){
- const buttons=[el('storyBtn'),el('randomStoryBtn'),el('quickBtn')];
+ const buttons=[el('storyBtn'),el('randomStoryBtn'),el('quickBtn'),el('regenerateBtn')];
  buttons.forEach(button=>button.disabled=true);
  setStatus('Creating script...');
  try{
   const request={idea:el('idea').value,previous_title:el('title').value,style:el('style').value,target:Number(el('target').value),ending:el('ending').value};
-  if(random)request.genre=el('genre').value;
+  request.mode=random?'random':'custom';
+  request.genre=el('genre').value;
+  request.provider=el('storyProvider').value;
+  const premise=request.idea.trim().toLowerCase();
+  request.avoid=premiseVariants.get(premise)||[];
   const result=await api('/api/story',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
   story=result.story;
+  if(story.variant)premiseVariants.set(premise,[...request.avoid,story.variant].slice(-8));
   el('title').value=story.title;
   el('lines').replaceChildren();
   story.lines.forEach(line=>addLine(line.speaker,line.text,line.pause_before,line.alternate,line.sound_effect,line.sound_offset));
   el('editor').style.display='block';
   el('renderBtn').disabled=false;
-  setStatus(story.source==='template'?'Offline outline ready. Fill in the details before rendering.':'Script ready. Review it before rendering.');
+  refreshSpeakerSlots();
+  setStatus('Script ready. Read through the conversation, then choose your voices and gameplay.');
   return true;
  }catch(error){setStatus('Error: '+error.message);return false}
  finally{buttons.forEach(button=>button.disabled=false)}
@@ -1394,11 +1427,11 @@ async function createStory(random=false){
 
 function addLine(s='Me',t='',pause=0,alternate,effect='none',offset=0){
  const row=document.createElement('div');row.className='line';
- const speaker=document.createElement('input');speaker.value=s;speaker.maxLength=24;speaker.placeholder='Speaker';speaker.setAttribute('aria-label','Speaker');
- const dialogue=document.createElement('input');dialogue.value=t;dialogue.maxLength=240;dialogue.placeholder='Dialogue';dialogue.setAttribute('aria-label','Dialogue');
+ const speaker=document.createElement('input');speaker.addEventListener('change',()=>refreshSpeakerSlots());speaker.value=s;speaker.maxLength=24;speaker.placeholder='Speaker';speaker.setAttribute('aria-label','Speaker');
+ const dialogue=document.createElement('textarea');dialogue.rows=2;dialogue.value=t;dialogue.maxLength=240;dialogue.placeholder='Dialogue';dialogue.setAttribute('aria-label','Dialogue');
  const timing=document.createElement('label');timing.textContent='Pause before (s)';
- const seconds=document.createElement('input');seconds.type='number';seconds.min='0';seconds.max='10';seconds.step='0.1';seconds.value=pause;timing.append(seconds);
- const remove=document.createElement('button');remove.textContent='×';remove.setAttribute('aria-label','Remove line');remove.onclick=()=>row.remove();
+ const seconds=document.createElement('input');seconds.type='number';seconds.min='0';seconds.max='10';seconds.step='any';seconds.value=pause;timing.append(seconds);
+ const remove=document.createElement('button');remove.textContent='×';remove.setAttribute('aria-label','Remove line');remove.onclick=()=>{row.remove();refreshSpeakerSlots()};
  const order=document.createElement('div');order.className='line-order';
  for(const [direction,label] of [['up','↑'],['down','↓']]){
   const move=document.createElement('button');move.type='button';move.textContent=label;move.setAttribute('aria-label','Move line '+direction);
@@ -1447,7 +1480,7 @@ function addLine(s='Me',t='',pause=0,alternate,effect='none',offset=0){
  }
  choices.value=effect;
  const delay=document.createElement('label');delay.textContent='Offset from speech (s)';
- const shift=document.createElement('input');shift.type='number';shift.className='lineOffset';shift.min='-2';shift.max='2';shift.step='0.1';shift.value=offset;
+ const shift=document.createElement('input');shift.type='number';shift.className='lineOffset';shift.min='-2';shift.max='2';shift.step='any';shift.value=offset;
  delay.append(shift);sound.append(summary,choices,delay);row.append(sound);
  el('lines').append(row);
 }
@@ -1472,14 +1505,14 @@ async function previewVoice(second=false){
  const select=el(second?'secondVoice':'voice');
  if(select.selectedOptions[0]?.disabled){setStatus('Choose an available voice before previewing.');return}
  if(select.value.startsWith('elevenlabs:')&&!confirm('Preview this ElevenLabs voice? This may use credits.'))return;
- let b=el('previewVoiceBtn');b.disabled=true;setStatus('Generating voice preview...');try{let r=await fetch('/api/voice-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({voice:el(second?'secondVoice':'voice').value,rate:Number(el('voiceRate').value)})});if(!r.ok){let d=await r.json();throw Error(d.detail||'Preview failed')}let blob=await r.blob();let url=URL.createObjectURL(blob);let audio=el('voicePreview');if(audio.dataset.url)URL.revokeObjectURL(audio.dataset.url);audio.src=url;audio.dataset.url=url;audio.style.display='block';await audio.play();setStatus('Voice preview ready.')}catch(e){setStatus('Voice error: '+e.message)}finally{b.disabled=false}}
+ let b=el('previewVoiceBtn');b.disabled=true;setStatus('Generating voice preview...');try{let r=await fetch('/api/voice-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({voice:el(second?'secondVoice':'voice').value,rate:Number(el('voiceRate').value),allow_premium:true})});if(!r.ok){let d=await r.json();throw Error(d.detail||'Preview failed')}let blob=await r.blob();let url=URL.createObjectURL(blob);let audio=el('voicePreview');if(audio.dataset.url)URL.revokeObjectURL(audio.dataset.url);audio.src=url;audio.dataset.url=url;audio.style.display='block';await audio.play();setStatus('Voice preview ready.')}catch(e){setStatus('Voice error: '+e.message)}finally{b.disabled=false}}
 async function quickGenerate(){
  if(el('renderBtn').disabled && el('progress').style.display==='block'){
   setStatus('Wait for the current render to finish.');
   return;
  }
  if(!confirm('Generate a new story and replace the current script in the editor? Save the script first if you want to keep it.'))return;
- if(await createStory(true))await renderVideo(true);
+ if(await createStory(!el('idea').value.trim()))await renderVideo(true);
 }
 async function refreshMusic(selected=el('musicTrack').value){
  try{
@@ -1509,12 +1542,29 @@ function confirmPremium(settings, action){
  return ![settings.voice,settings.second_voice].some(voice=>voice.startsWith('elevenlabs:')) ||
   confirm(action+' with ElevenLabs? This may use credits.');
 }
+function refreshSpeakerSlots(preferred=el('primarySpeaker').value){
+ const field=el('primarySpeaker');
+ const names=[...new Set(Array.from(el('lines').children, row=>row.children[0].value.trim()).filter(Boolean))];
+ field.replaceChildren(new Option('First speaker automatically',''));
+ for(const name of names)field.add(new Option(name,name));
+ field.value=names.includes(preferred)?preferred:'';
+}
 function productionSettings(){
  if(!el('voiceVolume').checkValidity() || !el('musicVolume').checkValidity())throw Error('Enter a voice level of 25–150% and music level of 0–100%.');
  return {style:el('style').value,voice:el('voice').value,second_voice:el('secondVoice').value,
-  voice_rate:Number(el('voiceRate').value),resolution:el('resolution').value,
-  gameplay_id:el('gameplayChoice').value||null,pacing:el('pacing').value,captions:el('exportCaptions').checked,
+  primary_speaker:el('primarySpeaker').value||null,voice_rate:Number(el('voiceRate').value),resolution:el('resolution').value,
+  gameplay_id:el('gameplayChoice').value||null,gameplay_percent:Number(el('gameplayPercent').value),gameplay_anchor:el('gameplayAnchor').value,pacing:el('pacing').value,captions:el('exportCaptions').checked,
   music_name:el('musicTrack').value||null,voice_volume:Number(el('voiceVolume').value),music_volume:Number(el('musicVolume').value)};
+}
+const localBackgrounds=new WeakMap();
+async function readyBackground(file){
+ if(!localBackgrounds.has(file)){
+  const form=new FormData();
+  form.append('file',file);
+  localBackgrounds.set(file,api('/api/upload-background',{method:'POST',body:form}));
+ }
+ try{return (await localBackgrounds.get(file)).name}
+ catch(error){localBackgrounds.delete(file);throw error}
 }
 async function renderVideo(automatic=false){
  let settings;
@@ -1524,6 +1574,8 @@ async function renderVideo(automatic=false){
  }catch(error){setStatus(error.message);return}
  el('renderBtn').disabled=true;
  el('videoSection').style.display='none';
+ el('emptyMonitor').hidden=false;el('emptyMonitor').textContent='Rendering your Short…';
+ el('layoutPreview').hidden=true;
  el('progress').value=0;el('progress').style.display='block';
  setStatus('Preparing...');
  try{
@@ -1531,12 +1583,11 @@ async function renderVideo(automatic=false){
   const file=settings.gameplay_id?null:el('background').files[0];
   if(file){
    setStatus('Uploading your background...');
-   const form=new FormData();form.append('file',file);
-   background=(await api('/api/upload-background',{method:'POST',body:form})).name;
+   background=await readyBackground(file);
   }else if(automatic && !settings.gameplay_id){
    settings.gameplay_id='auto';
   }
-  const request={...settings,target_seconds:el('fitDuration').checked?Number(el('target').value):null,story:{title:el('title').value,lines:editedLines()},background_name:background};
+  const request={...settings,allow_premium:true,target_seconds:el('fitDuration').checked?Number(el('target').value):null,story:{title:el('title').value,lines:editedLines()},background_name:background};
   const result=await api('/api/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
   poll(result.id);
  }catch(error){setStatus('Error: '+error.message);el('renderBtn').disabled=false}
@@ -1551,18 +1602,21 @@ async function showLayoutPreview(step){
  const image=el('layoutImage');
  const panel=el('layoutPreview');
  panel.hidden=false;
+ el('emptyMonitor').hidden=true;el('videoSection').style.display='none';
  try{
   const lines=editedLines();
   if(lines.length<2)throw Error('Add at least two dialogue lines before previewing.');
   const line=Math.max(0,Math.min(lines.length-1,layoutLine+step));
   const gameplayId=el('gameplayChoice').value||null;
-  const placeholder=!!el('background').files[0]&&!gameplayId;
+  const file=gameplayId?null:el('background').files[0];
   layoutBusy=true;
   el('layoutPrevious').disabled=true;el('layoutNext').disabled=true;
-  status.textContent='Drawing layout…';
+  status.textContent=file?'Preparing local gameplay preview…':'Drawing layout…';
+  const background_name=file?await readyBackground(file):null;
   const response=await fetch('/api/layout-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
    story:{title:el('title').value,lines},line_index:line,style:el('style').value,
-   gameplay_id:gameplayId,show_gameplay:placeholder
+   gameplay_id:gameplayId,background_name,resolution:el('resolution').value,
+   gameplay_percent:Number(el('gameplayPercent').value),gameplay_anchor:el('gameplayAnchor').value
   })});
   if(!response.ok){
    const data=await response.json();
@@ -1572,7 +1626,7 @@ async function showLayoutPreview(step){
   if(layoutUrl)URL.revokeObjectURL(layoutUrl);
   layoutUrl=preview;image.src=preview;image.hidden=false;
   layoutLine=line;
-  status.textContent='Line '+(line+1)+' of '+lines.length+(placeholder?' · One-time gameplay shown as a placeholder':'');
+  status.textContent='Line '+(line+1)+' of '+lines.length;
   el('layoutPrevious').disabled=line===0;el('layoutNext').disabled=line>=lines.length-1;
  }catch(error){
   image.hidden=true;
@@ -1610,12 +1664,12 @@ async function attachCaptionReview(video, panel, id, available){
   }
  }
 }
-async function poll(id){try{let d=await api('/api/job/'+id);setStatus(d.message+(d.state==='running'?' • '+d.percent+'%':''));el('progress').value=d.percent;if(d.state==='complete'){el('preview').src=d.video_url;el('download').href=d.video_url;el('downloadCaptions').hidden=!d.captions_url;if(d.captions_url)el('downloadCaptions').href=d.captions_url;attachCaptionReview(el('preview'),el('previewCaptionReview'),id,d.captions_url);el('description').value=d.description;el('videoSection').style.display='block';el('renderBtn').disabled=false;refreshLibrary();const duration='Rendered '+d.duration+' s'+(d.target_seconds?' (target '+d.target_seconds+' s)':'')+'. ';const timing=d.target_seconds&&Math.abs(d.duration-d.target_seconds)>0.2?'Edit the script or pauses to get closer to your target. ':'';setStatus(duration+timing+'Review the full MP4 in Library before approval.');return}if(d.state==='failed'){el('renderBtn').disabled=false;return}setTimeout(()=>poll(id),1500)}catch(e){setStatus('Status error: '+e.message);el('renderBtn').disabled=false}}
+async function poll(id){try{let d=await api('/api/job/'+id);setStatus(d.message+(d.state==='running'?' • '+d.percent+'%':''));el('progress').value=d.percent;if(d.state==='complete'){latestExportId=id;el('emptyMonitor').hidden=true;el('layoutPreview').hidden=true;el('preview').src=d.video_url;el('download').href=d.video_url;el('downloadCaptions').hidden=!d.captions_url;if(d.captions_url)el('downloadCaptions').href=d.captions_url;attachCaptionReview(el('preview'),el('previewCaptionReview'),id,d.captions_url);el('description').value=d.description;el('videoSection').style.display='block';el('renderBtn').disabled=false;refreshLibrary();const duration='Rendered '+d.duration+' s'+(d.target_seconds?' (target '+d.target_seconds+' s)':'')+'. ';const timing=d.target_seconds&&Math.abs(d.duration-d.target_seconds)>0.2?'Edit the script or pauses to get closer to your target. ':'';setStatus(duration+timing+'Review the full MP4 in Library before approval.');return}if(d.state==='failed'){el('emptyMonitor').textContent='Render failed. Check the message above and retry.';el('renderBtn').disabled=false;return}setTimeout(()=>poll(id),1500)}catch(e){setStatus('Status error: '+e.message);el('renderBtn').disabled=false}}
 api('/api/health').then(d=>{el('lines').classList.toggle('ollama-available',Boolean(d.ollama_model));el('health').textContent=d.ffmpeg&&d.ffprobe?'✅ FFmpeg detected. Private local server ready. '+(d.ollama_model?'Ollama AI enabled.':'Offline story mode.'):'⚠️ FFmpeg not found. Install FFmpeg and restart the app.'}).catch(()=>el('health').textContent='Could not check local server.');
 
 async function saveProject(){
- if(!el('editor').offsetParent){setStatus('Create a script first');return}
- try{const lines=editedLines();const d=await api('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...productionSettings(),title:el('title').value,lines,target:Number(el('target').value),fit_duration:el('fitDuration').checked,genre:el('genre').value,ending:el('ending').value})});setStatus('Project saved: '+d.title);await refreshProjects();el('projects').value=d.id}catch(e){setStatus('Could not save: '+e.message)}
+ if(!el('lines').children.length){setStatus('Create a script first');return}
+ try{const lines=editedLines();const d=await api('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...productionSettings(),title:el('title').value,idea:el('idea').value,provider:el('storyProvider').value,lines,target:Number(el('target').value),fit_duration:el('fitDuration').checked,genre:el('genre').value,ending:el('ending').value})});setStatus('Project saved: '+d.title);await refreshProjects();el('projects').value=d.id}catch(e){setStatus('Could not save: '+e.message)}
 }
 async function refreshProjects(){try{const d=await api('/api/projects');el('projects').replaceChildren(new Option('Choose a project...',''));d.projects.forEach(p=>el('projects').add(new Option(p.title,p.id)))}catch(e){setStatus('Projects: '+e.message)}}
 async function loadProject(){
@@ -1623,10 +1677,11 @@ async function loadProject(){
  try{
   const project=await api('/api/projects/'+id);
   el('title').value=project.title;
+  el('idea').value=project.idea||'';el('storyProvider').value=project.provider||'offline';
   if(project.voice)selectVoice('voice',project.voice);
   if(project.second_voice)selectVoice('secondVoice',project.second_voice);
   const fields={style:project.style,
-   voiceRate:project.voice_rate,resolution:project.resolution,gameplayChoice:project.gameplay_id||'',
+   voiceRate:project.voice_rate,resolution:project.resolution,gameplayChoice:project.gameplay_id||'',gameplayPercent:project.gameplay_percent??58,gameplayAnchor:project.gameplay_anchor||'center',
    pacing:project.pacing||'normal',target:project.target||45,genre:project.genre||'random',ending:project.ending||'resolved'};
   for(const [field,value] of Object.entries(fields)){
    const select=el(field);
@@ -1639,6 +1694,7 @@ async function loadProject(){
   el('musicVolume').value=project.music_volume??22;
   el('lines').replaceChildren();
   project.lines.forEach(line=>addLine(line.speaker,line.text,line.pause_before,line.alternate,line.sound_effect,line.sound_offset));
+  refreshSpeakerSlots(project.primary_speaker||'');
   el('editor').style.display='block';el('renderBtn').disabled=false;
   setStatus('Loaded saved project');
  }catch(error){setStatus(error.message)}
@@ -1665,7 +1721,7 @@ async function queueBatch(endpoint, choices){
   if(!confirmPremium(settings,'Render this entire batch'))return;
   buttons.forEach(button=>button.disabled=true);
   const target=Number(el('target').value);
-  const request={...settings,...choices,target,ending:el('ending').value,
+  const request={...settings,allow_premium:true,genre:el('genre').value,provider:el('storyProvider').value,...choices,target,ending:el('ending').value,
    target_seconds:el('fitDuration').checked?target:null};
   if(endpoint==='/api/batch-random'&&!request.gameplay_id)request.gameplay_id='auto';
   const queued=await api(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
@@ -1700,10 +1756,12 @@ async function refreshLibrary(){
 }
 let selectedReviewId=null;
 async function runQualityCheck(){
- if(!selectedReviewId)return;
+ const videoId=selectedReviewId;
+ if(!videoId)return;
  const box=el('qualityPanel');box.textContent='Checking the MP4…';
  try{
-  const q=await api('/api/library/'+selectedReviewId+'/quality');
+  const q=await api('/api/library/'+videoId+'/quality');
+  if(selectedReviewId!==videoId)return;
   const lines=[q.passed?'Technical export: OK':'Technical export: BLOCKED',
    `${q.width}×${q.height} · ${q.fps} FPS · ${q.duration_seconds}s · ${q.file_size_mb} MB`,
    `Audio track: ${q.audio_present?'Present':'Missing'}`];
@@ -1712,16 +1770,19 @@ async function runQualityCheck(){
   for(const w of q.warnings)lines.push('CHECK: '+w);
   lines.push('Listen to the entire voiceover and confirm gameplay rights before approval.');
   box.textContent=lines.join('\n');box.style.whiteSpace='pre-line';
- }catch(e){box.textContent='Could not inspect video: '+e.message}
+ }catch(e){if(selectedReviewId===videoId)box.textContent='Could not inspect video: '+e.message}
 }
 async function saveReview(){
- if(!selectedReviewId)return;
+ const videoId=selectedReviewId;
+ if(!videoId)return;
  const btn=el('saveReviewBtn');btn.disabled=true;
  try{
-  await api('/api/library/'+selectedReviewId+'/review',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:el('reviewState').value,notes:el('reviewNotes').value})});
-  el('reviewFeedback').textContent='Saved! Approved videos appear in the downloadable upload kit.';
+  const updated=await api('/api/library/'+videoId+'/review',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:el('reviewState').value,notes:el('reviewNotes').value})});
+  if(selectedReviewId!==videoId){await refreshLibrary();return}
+  updateHandoffControls(updated);
+  el('reviewFeedback').textContent=updated.review_status==='approved'?'Approved for handoff. Choose Download publishing kit.':'Review decision saved.';
   await refreshLibrary();
- }catch(e){el('reviewFeedback').textContent='Review save failed: '+e.message}
+ }catch(e){if(selectedReviewId===videoId)el('reviewFeedback').textContent='Review save failed: '+e.message}
  finally{btn.disabled=false}
 }
 function openLibraryItem(v){
@@ -1734,22 +1795,65 @@ function openLibraryItem(v){
  el('libraryDetails').hidden=false;el('libraryTitle').textContent=v.title;
  el('libraryPlayer').src=v.video_url;el('libraryDescription').value=v.description||'';
  el('libraryDownload').href=v.video_url;el('subtitleDownload').hidden=!v.captions_url;if(v.captions_url)el('subtitleDownload').href=v.captions_url;attachCaptionReview(el('libraryPlayer'),el('libraryCaptionReview'),v.id,v.captions_url);el('handoffDownload').href='/api/chatgpt-handoff/'+encodeURIComponent(v.id);
+ updateHandoffControls(v);
+ el('cloudHandoffResult').hidden=true;
  el('libraryDetails').scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 
-async function createCloudHandoff(){
- if(!selectedReviewId)return;
- const btn=el('cloudHandoffBtn'),out=el('cloudHandoffResult');out.hidden=false;
- btn.disabled=true;out.textContent='Uploading approved video to your private storage…';
+function updateHandoffControls(video){
+ const approved=video.review_status==='approved' && Boolean(video.approved_video_sha256);
+ el('handoffDownload').hidden=!approved;
+ el('cloudHandoffBtn').hidden=!approved;
+ el('cloudHandoffBtn').textContent='Create private link';
+ el('handoffNext').textContent=approved
+  ?'Download the kit and upload in YouTube Studio, or create a private link for a supported uploader. You choose when to publish.'
+  :'Watch the MP4, then approve this version to unlock the publishing kit.';
+}
+async function checkHandoff(live){
+ const out=el('handoffDiagnostics');
+ out.textContent=live?'Checking bucket access…':'Checking local setup…';
  try{
-  const d=await api('/api/cloud-handoff/'+encodeURIComponent(selectedReviewId),{method:'POST'});
+  if(live){
+   const result=await api('/api/cloud-handoff/test',{method:'POST'});
+   out.textContent=result.message;
+   return;
+  }
+  const settings=await api('/api/cloud-handoff/config');
+  out.textContent=settings.configured
+   ?'Storage configured. Test the connection'+(settings.auto_upload_on_approval?' · automatic private transfer is enabled.':'.')
+   :'To enable private transfer, set '+settings.missing.join(', ')+' in the local .env and restart Shadow Studio. Use a private bucket and add SHADOW_S3_ENDPOINT for S3-compatible providers.';
+ }catch(error){out.textContent=error.message}
+}
+async function createCloudHandoff(){
+ const videoId=selectedReviewId;
+ if(!videoId)return;
+ const btn=el('cloudHandoffBtn'),out=el('cloudHandoffResult');
+ out.hidden=false;btn.disabled=true;out.textContent='Preparing approved video…';
+ const path='/api/cloud-handoff/'+encodeURIComponent(videoId);
+ try{
+  let result=await api(path,{method:'POST'});
+  while(['queued','checking','uploading'].includes(result.status)){
+   if(selectedReviewId!==videoId)return;
+   const percent=result.bytes_total?Math.round(result.bytes_sent/result.bytes_total*100):0;
+   out.textContent=result.status==='uploading'?'Uploading to private storage · '+percent+'%':'Checking current video and approval…';
+   await new Promise(resolve=>setTimeout(resolve,750));
+   result=await api(path+'/status');
+  }
+  if(selectedReviewId!==videoId)return;
+  if(result.status!=='uploaded')throw Error(result.error||result.message||'Private link unavailable.');
   out.replaceChildren();
-  const intro=document.createElement('p');intro.textContent='Private link ready (expires in 24 hours). Anyone with the link can view the video. Paste this request into ChatGPT to create a vidIQ draft; nothing is published yet.';
-  const area=document.createElement('textarea');area.value=d.request_for_chatgpt;area.readOnly=true;area.rows=7;
-  const copy=document.createElement('button');copy.textContent='Copy ChatGPT + vidIQ request';copy.onclick=()=>navigator.clipboard.writeText(area.value);
+  const intro=document.createElement('p');
+  intro.textContent='Temporary link ready. Anyone who has this link can view the video. Use it with a supported uploader and review the draft before publishing.';
+  const area=document.createElement('textarea');area.value=result.request_for_chatgpt;area.readOnly=true;area.rows=6;
+  const copy=document.createElement('button');copy.textContent='Copy draft request';
+  copy.onclick=async()=>{try{await navigator.clipboard.writeText(area.value);copy.textContent='Copied'}catch{area.select()}};
   out.append(intro,area,copy);
- }catch(e){out.textContent='Handoff not created: '+e.message+' Configure storage in .env (see README).'}
- finally{btn.disabled=false}
+ }catch(error){
+  if(selectedReviewId===videoId){
+   out.textContent=error.message+' You can retry or download the publishing kit.';
+   btn.textContent='Retry private link';
+  }
+ }finally{btn.disabled=false}
 }
 
 async function stagePublishingDraft(){
@@ -1771,7 +1875,28 @@ async function refreshPublishingDrafts(){
    row.append(title,info);container.appendChild(row)}
  }catch(e){container.textContent=e.message}
 }
-async function refreshJobs(){try{let d=await api('/api/jobs');let list=el('jobList');list.replaceChildren();for(const j of d.jobs){if(j.title==='Batch render')continue;const r=document.createElement('div');r.style='border-bottom:1px solid #34415a;padding:10px 0';const t=document.createElement('strong');t.textContent=j.title+' — '+j.state;r.append(t);if(j.video_url){const a=document.createElement('a');a.href=j.video_url;a.textContent='  Download video';a.download='';a.style='color:#a5ccff;margin-left:12px';r.append(a)}list.append(r)}}catch(e){el('jobList').textContent=e.message}}
+async function refreshJobs(){
+ const list=el('jobList');
+ try{
+  const {jobs}=await api('/api/jobs');list.replaceChildren();
+  if(!jobs.length){list.textContent='Your renders will appear here.';return}
+  for(const job of jobs){
+   const row=document.createElement('article');row.className='queue-job';
+   const title=document.createElement('strong');title.textContent=job.title;
+   const status=document.createElement('p');status.textContent=job.message;
+   row.append(title,status);
+   if(job.state==='running'){
+    const progress=document.createElement('progress');progress.value=job.percent;progress.max=100;
+    progress.setAttribute('aria-label','Render progress');row.append(progress);
+   }
+   if(job.video_url){
+    const review=document.createElement('button');review.className='subtle';review.textContent='Review video';
+    review.onclick=async()=>{latestExportId=job.id;await reviewExport()};row.append(review);
+   }
+   list.append(row);
+  }
+ }catch(error){list.textContent=error.message}
+}
 async function createClip(){el('clipBtn').disabled=true;try{el('clipStatus').textContent='Importing...';const u=await clipSource('clipFile','clipUrl','clipRights');el('clipStatus').textContent='Trimming...';const d=await api('/api/clip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({background_name:u.name,start:Number(el('clipStart').value),end:Number(el('clipEnd').value),orientation:'vertical'})});const a=document.createElement('a');a.href=d.download_url;a.download='shadow_clip.mp4';a.textContent='Download vertical clip';a.style='color:#a5ccff';el('clipLink').replaceChildren(a);el('clipStatus').textContent='Clip ready'}catch(e){el('clipStatus').textContent='Clip error: '+e.message}finally{el('clipBtn').disabled=false}}
 function selectVoice(id, value){
  const select=el(id);
@@ -1845,4 +1970,4 @@ async function refreshIntegrationStatus(live){
   }
  }catch(e){root.textContent='Integration check failed: '+e.message}
 }
-refreshGameplay();showStarters();refreshPublishingDrafts();refreshIntegrationStatus(false);switchView('create');</script></body></html>'''
+refreshGameplay();checkHandoff(false);showStarters();refreshPublishingDrafts();refreshIntegrationStatus(false);switchView('create');</script></body></html>'''

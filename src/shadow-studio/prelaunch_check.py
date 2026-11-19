@@ -64,7 +64,7 @@ def main():
         assert report['passed'], report
         assert (report['width'], report['height'], report['fps']) == (720,1280,30)
         assert report['audio_present']
-        subtitles = (movie.parent/'captions.srt').read_text(encoding='utf-8')
+        subtitles = (movie.parent/'captions.srt').read_bytes()
         from captions import read_captions
         cues = read_captions(movie.parent/'captions.srt')
         transcript = ' '.join(' '.join(cue['text'].split()) for cue in cues)
@@ -93,7 +93,7 @@ def main():
                 manifest = json.loads(archive.read('handoff.json'))
                 assert manifest['sha256'] == hashlib.sha256(movie.read_bytes()).hexdigest()
                 assert archive.read('short.mp4') == movie.read_bytes()
-                assert archive.read('captions.srt') == subtitles.encode('utf-8')
+                assert archive.read('captions.srt') == subtitles
                 assert manifest['not_authorized_for_public_publishing'] is True
             print('PASS: unapproved videos blocked; approved MP4 and SRT handoff verified')
             # MP4 trailer edits can leave a technically valid file but still
@@ -111,23 +111,21 @@ def main():
             assert app_client.patch(f'/api/library/{jid}/review',json={'status':'approved'}).status_code == 200
 
 
-            # Alter encoded payload but keep readable MP4 container and audio.
+            # Corrupt an AVCC NAL length in an encoded keyframe while keeping
+            # the MP4 container and audio intact. Zeroing an arbitrary payload
+            # range can still decode successfully on some FFmpeg versions.
             packets = json.loads(subprocess.check_output(['ffprobe','-v','error',
-                         '-select_streams','v:0','-show_packets','-show_entries',
-                         'packet=pos,size','-of','json',str(folder/'short.mp4')]))['packets']
-            candidate = next((p for p in packets[2:] if int(p['size']) > 250), None)
-            if candidate:
-                b = bytearray((folder/'short.mp4').read_bytes())
-                pos, size = int(candidate['pos']), int(candidate['size'])
-                end = min(pos+size,pos+500)
-                b[pos+10:end] = b'\x00'*(end-pos-10)
-                (folder/'short.mp4').write_bytes(b)
-                corrupt = analyze(folder/'short.mp4')
-                assert not corrupt['passed'], corrupt
-                assert app_client.get(f'/api/chatgpt-handoff/{jid}').status_code == 409
-                print('PASS: damaged encoded video blocked even after earlier approval')
-            else:
-                print('SKIP: no sufficiently large encoded video packet for corruption test')
+                       '-select_streams','v:0','-show_packets','-show_entries',
+                       'packet=pos,size,flags','-of','json',str(folder/'short.mp4')]))['packets']
+            candidate = next(p for p in packets if 'K' in p['flags'] and int(p['size'])>4)
+            content = bytearray((folder/'short.mp4').read_bytes())
+            position = int(candidate['pos'])
+            content[position:position+4] = (2**31-1).to_bytes(4,'big')
+            (folder/'short.mp4').write_bytes(content)
+            failure = app_client.get(f'/api/library/{jid}/quality')
+            assert failure.status_code == 422 or (failure.status_code == 200 and not failure.json()['passed']), failure.text
+            assert app_client.get(f'/api/chatgpt-handoff/{jid}').status_code == 409
+            print('PASS: damaged encoded video blocked even after earlier approval')
         finally:
             app.OUT = original_out
     print('RESULT: PRELAUNCH OFFLINE CHECK PASSED')
