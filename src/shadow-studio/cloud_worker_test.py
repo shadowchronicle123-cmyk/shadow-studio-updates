@@ -26,8 +26,10 @@ def main():
                 pairs = [frozenset((job["voice_a"], job["voice_b"])) for job in jobs]
                 assert len(pairs) == len(set(pairs)), "Repeated a voice pair while alternatives remain"
                 assert all(job["state"] == "planned" for job in jobs)
+            db.close()
         with open_db(Path(directory) / "jobs.sqlite3") as db:
             assert db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 8
+            db.close()
     print("PASS offline story creation, SQLite persistence, daily idempotency, voice rotation, no paid providers")
 
 
