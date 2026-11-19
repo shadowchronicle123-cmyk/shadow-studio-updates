@@ -247,7 +247,7 @@ def dialogue_holds(narration, gap, minimum_hold, target_seconds=None):
 
 
 def generate(story,output_dir,style='messages',background=None,progress=None,voice='en-US-AriaNeural',second_voice=None,voice_rate=0,resolution='720p',gameplay_start=0,*,pacing='normal',captions=True,
-             music=None,voice_volume=100,music_volume=22,target_seconds=None,gameplay_percent=58,gameplay_anchor="center",primary_speaker=None,gameplay_trim_start=None,gameplay_trim_end=None):
+             music=None,voice_volume=100,music_volume=22,target_seconds=None,gameplay_percent=58,gameplay_anchor="center",primary_speaker=None,gameplay_trim_start=None,gameplay_trim_end=None,voice_factory=None):
     gap, minimum_hold = SCENE_PACING[pacing]
     if not isinstance(story, dict) or not isinstance(story.get('lines'), list) or not 1 <= len(story['lines']) <= 24:
         raise ValueError('Story requires 1 to 24 narration scenes')
@@ -266,7 +266,7 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):raise RuntimeError('FFmpeg and ffprobe are required on PATH')
     output_dir=Path(output_dir);output_dir.mkdir(parents=True,exist_ok=True)
     first_speaker=str(primary_speaker or story['lines'][0].get('speaker','Narrator')).strip().casefold()
-    if second_voice is not None:
+    if second_voice is not None and voice_factory is None:
         from voice_engine import valid_voice
         if not valid_voice(second_voice): raise ValueError('Second character voice is unavailable')
     with tempfile.TemporaryDirectory(prefix='shadow_') as temp:
@@ -287,7 +287,7 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
             wav=tmp/f'voice_{i:03}.wav'
             who=str(line.get('speaker','Narrator')).strip().casefold()
             selected=voice if who==first_speaker else (second_voice or voice)
-            create_voice(line['text'],wav,selected,voice_rate)
+            (voice_factory or create_voice)(line['text'],wav,selected,voice_rate)
             # Normalize all voice clips into PCM 16k for concatenation.
             normalized=tmp/f'a_{i:03}.wav'
             run(['ffmpeg','-y','-loglevel','error','-i',wav,'-ar','16000','-ac','1','-c:a','pcm_s16le',normalized])

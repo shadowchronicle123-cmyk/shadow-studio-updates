@@ -1,0 +1,12 @@
+[Unit]
+Description=Render the daily ShadowChronicles Short
+After=local-fs.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/shadow-studio
+ExecStart=/opt/shadow-studio/.venv/bin/python production_worker.py run --state %h/.local/state/shadowchronicles --ideas %h/.config/shadowchronicles/ideas.json --media %h/.local/share/shadowchronicles/gameplay --timezone America/New_York
+ExecStopPost=/opt/shadow-studio/.venv/bin/python production_worker.py recover-service --state %h/.local/state/shadowchronicles
+TimeoutStartSec=30min
+NoNewPrivileges=true
+UMask=0077

@@ -62,7 +62,10 @@ jobs:
             'cloud_handoff_test.py',
             'update_manager_test.py',
             'migration_acceptance_test.py',
-            'windows_voice_test.py'
+            'windows_voice_test.py',
+            'production_worker_test.py',
+            'private_upload_test.py',
+            'streamer_preview_test.py'
           )
           foreach ($test in $tests) {
             Write-Host "Running $test"
@@ -101,6 +104,9 @@ jobs:
           python-version: '3.12'
       - name: Set up media tools
         run: bash .github/scripts/setup-test-ffmpeg.sh
+      - name: Install offline speech engine
+        timeout-minutes: 4
+        run: sudo apt-get -o Acquire::Retries=2 install --no-install-recommends -y espeak-ng
       - name: Run Linux regression tests
         working-directory: src/shadow-studio
         run: |
@@ -116,8 +122,12 @@ jobs:
           python cloud_handoff_test.py
           python update_manager_test.py
           python migration_acceptance_test.py
+          python production_worker_test.py --real
+          python private_upload_test.py
+          python streamer_preview_test.py
 
   candidate:
+    if: github.head_ref == 'qa/cloud-windows-matrix' || github.ref == 'refs/heads/qa/cloud-windows-matrix'
     needs: [windows-qa, linux-qa]
     runs-on: ubuntu-24.04
     steps:

@@ -85,6 +85,26 @@ const path=require('node:path');
   await page.getByRole('button',{name:'Render Queue',exact:true}).click();
   await page.getByRole('button',{name:'Refresh jobs',exact:true}).click();
   await page.getByRole('button',{name:'Review video',exact:true}).waitFor({state:'visible'});
+  const licensedClip=path.join(folder,'synthetic-clip.mp4');
+  execFileSync('ffmpeg',['-y','-loglevel','error','-f','lavfi','-i','testsrc2=size=320x180:rate=24:duration=4',
+                        '-f','lavfi','-i','sine=f=440:d=4','-c:v','libx264','-c:a','aac',licensedClip]);
+  await page.getByRole('button',{name:'Media Tools',exact:true}).click();
+  await page.getByLabel('Source video',{exact:true}).filter({visible:true}).setInputFiles(licensedClip);
+  await page.getByLabel('Creator',{exact:true}).fill('Synthetic creator');
+  await page.getByLabel('Source link',{exact:true}).fill('https://www.twitch.tv/synthetic');
+  await page.getByLabel('Permission record or agreement reference').fill('Synthetic acceptance fixture');
+  await page.getByLabel('Permission scope').selectOption('edit-and-repost');
+  await page.getByLabel('Horizontal crop').selectOption('left');
+  await page.locator('#streamerEnd').fill('3.5');
+  await page.getByRole('button',{name:'Render clip preview'}).click();
+  await page.waitForFunction(()=>document.querySelector('#streamerPreviewOutput video')?.videoWidth===1080);
+  if(process.env.SHADOW_ARTIFACT_DIR){
+   const video=page.locator('#streamerPreviewOutput video');
+   const response=await page.request.get(await video.evaluate(element=>element.src));
+   assert(response.ok());
+   fs.writeFileSync(path.join(process.env.SHADOW_ARTIFACT_DIR,'streamer-preview.mp4'),await response.body());
+   await page.locator('#streamerPreviewOutput').screenshot({path:path.join(process.env.SHADOW_ARTIFACT_DIR,'streamer-preview.png')});
+  }
   assert.deepEqual(issues,[]);
   const mobile=await browser.newPage({viewport:{width:390,height:844}});
   await mobile.goto(url);
