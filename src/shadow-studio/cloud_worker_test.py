@@ -10,7 +10,7 @@ from cloud_worker import open_db, plan_day
 
 def main():
     with tempfile.TemporaryDirectory() as directory:
-        with open_db(Path(directory) / "jobs.sqlite3") as db:
+        with __import__("contextlib").closing(open_db(Path(directory) / "jobs.sqlite3")) as db:
             with patch("story_engine._local_json", side_effect=AssertionError("External AI must not be called")):
                 first = plan_day(db, "2026-11-19", random.Random(1))
                 again = plan_day(db, "2026-11-19", random.Random(2))
