@@ -7,7 +7,7 @@ const path=require('node:path');
 (async()=>{
  const folder=fs.mkdtempSync(path.join(os.tmpdir(),'shadow-browser-'));
  const fixture=path.join(folder,'gameplay.mp4');
- let browser, server;
+ let browser, server, page;
  try{
   execFileSync('ffmpeg',['-y','-loglevel','error','-f','lavfi','-i','testsrc2=size=640x360:rate=24:duration=2','-c:v','libx264',fixture]);
   server=spawn(process.env.PYTHON || 'python',['browser_acceptance_server.py',folder],{stdio:'inherit'});
@@ -19,7 +19,7 @@ const path=require('node:path');
   }
   assert(running,'Fixture app did not start');
   browser=await chromium.launch({headless:true,channel:process.env.SHADOW_BROWSER_CHANNEL || undefined,executablePath:process.env.SHADOW_CHROMIUM || undefined});
-  const page=await browser.newPage({viewport:{width:1440,height:1050},acceptDownloads:true});
+  page=await browser.newPage({viewport:{width:1440,height:1050},acceptDownloads:true});
   const issues=[];
   page.on('pageerror',error=>issues.push(error.message));
   await page.goto(url);
@@ -33,6 +33,7 @@ const path=require('node:path');
   await page.waitForFunction(previous=>document.querySelector('#title').value && document.querySelector('#title').value!==previous,title);
   const script=await page.locator('#lines textarea').evaluateAll(lines=>lines.map(line=>line.value));
   assert(script.some(line=>line.includes('Lake House on Saturday')));
+  assert(await page.locator('#lines input[type=number]').evaluateAll(inputs=>inputs.every(input=>input.checkValidity())),'Generated timing is invalid in the editor');
   await page.getByRole('button',{name:'Save project',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('Project saved:'));
   const saved=await page.locator('#projects').inputValue();
@@ -83,6 +84,15 @@ const path=require('node:path');
   assert.equal(await mobile.evaluate(()=>document.documentElement.scrollWidth),390);
   await mobile.screenshot({path:process.env.SHADOW_ARTIFACT_DIR && path.join(process.env.SHADOW_ARTIFACT_DIR,'mobile.png')});
   console.log('PASS Chromium desktop and mobile workflow: generation, regeneration, project, gameplay, preview, 1080p render, quality, approve, publishing ZIP and setup');
+ }catch(error){
+  if(page){
+   const status=await page.locator('#status').textContent({timeout:3000}).catch(()=>null);
+   console.error('Workspace status:',status);
+   if(process.env.SHADOW_ARTIFACT_DIR){
+    await page.screenshot({path:path.join(process.env.SHADOW_ARTIFACT_DIR,'failure.png')}).catch(()=>{});
+   }
+  }
+  throw error;
  }finally{
   if(browser)await browser.close();
   if(server && server.exitCode===null)await new Promise(resolve=>{server.once('exit',resolve);server.kill()});

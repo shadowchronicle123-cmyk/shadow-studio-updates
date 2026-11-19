@@ -37,11 +37,7 @@ jobs:
       - name: Install Linux FFmpeg
         if: runner.os == 'Linux'
         timeout-minutes: 6
-        run: |
-          if ! command -v ffmpeg || ! command -v ffprobe; then
-            sudo apt-get -o Acquire::Retries=2 update
-            sudo apt-get -o Acquire::Retries=2 install -y ffmpeg
-          fi
+        run: bash ../../.github/scripts/setup-test-ffmpeg.sh
       - name: Install Windows FFmpeg
         if: runner.os == 'Windows'
         shell: pwsh

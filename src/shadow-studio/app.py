@@ -1430,7 +1430,7 @@ function addLine(s='Me',t='',pause=0,alternate,effect='none',offset=0){
  const speaker=document.createElement('input');speaker.addEventListener('change',()=>refreshSpeakerSlots());speaker.value=s;speaker.maxLength=24;speaker.placeholder='Speaker';speaker.setAttribute('aria-label','Speaker');
  const dialogue=document.createElement('textarea');dialogue.rows=2;dialogue.value=t;dialogue.maxLength=240;dialogue.placeholder='Dialogue';dialogue.setAttribute('aria-label','Dialogue');
  const timing=document.createElement('label');timing.textContent='Pause before (s)';
- const seconds=document.createElement('input');seconds.type='number';seconds.min='0';seconds.max='10';seconds.step='0.1';seconds.value=pause;timing.append(seconds);
+ const seconds=document.createElement('input');seconds.type='number';seconds.min='0';seconds.max='10';seconds.step='any';seconds.value=pause;timing.append(seconds);
  const remove=document.createElement('button');remove.textContent='×';remove.setAttribute('aria-label','Remove line');remove.onclick=()=>{row.remove();refreshSpeakerSlots()};
  const order=document.createElement('div');order.className='line-order';
  for(const [direction,label] of [['up','↑'],['down','↓']]){
@@ -1480,7 +1480,7 @@ function addLine(s='Me',t='',pause=0,alternate,effect='none',offset=0){
  }
  choices.value=effect;
  const delay=document.createElement('label');delay.textContent='Offset from speech (s)';
- const shift=document.createElement('input');shift.type='number';shift.className='lineOffset';shift.min='-2';shift.max='2';shift.step='0.1';shift.value=offset;
+ const shift=document.createElement('input');shift.type='number';shift.className='lineOffset';shift.min='-2';shift.max='2';shift.step='any';shift.value=offset;
  delay.append(shift);sound.append(summary,choices,delay);row.append(sound);
  el('lines').append(row);
 }

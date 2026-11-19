@@ -68,10 +68,7 @@ jobs:
       - name: Install export test dependencies
         timeout-minutes: 4
         run: |
-          if ! command -v ffmpeg || ! command -v ffprobe; then
-            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 update
-            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 install -y ffmpeg
-          fi
+          bash .github/scripts/setup-test-ffmpeg.sh
           python -m pip install --disable-pip-version-check --timeout 20 --retries 2 packaging -r src/shadow-studio/requirements.txt
       - name: Run offline release tests
         working-directory: src/shadow-studio
