@@ -1,0 +1,99 @@
+"""Real end-to-end local video caption render and no-overwrite QA."""
+from pathlib import Path
+from array import array
+from sys import byteorder
+import shutil
+import subprocess
+import tempfile
+
+from render_word_captions import render_local_clip
+
+ffmpeg = shutil.which("ffmpeg")
+ffprobe = shutil.which("ffprobe")
+assert ffmpeg and ffprobe, "FFmpeg and FFprobe required"
+with tempfile.TemporaryDirectory() as folder:
+    root = Path(folder)
+    source = root / "source.mp4"
+    output = root / "captioned.mp4"
+    subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+                    "-f", "lavfi", "-i", "color=c=black:s=540x960:r=10:d=1.5",
+                    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=1.5",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(source)],
+                   check=True, timeout=60)
+    words = [{"text": "HELLO", "start": 0.0, "end": 0.4},
+             {"text": "WORLD", "start": 0.7, "end": 1.0}]
+    assert Path(render_local_clip(source, words, output)).is_file()
+    probe = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0",
+                            "-show_entries", "stream=width,height",
+                            "-of", "csv=p=0", str(output)],
+                           capture_output=True, text=True, check=True, timeout=30)
+    assert probe.stdout.strip() == "540,960", probe.stdout
+    audio_probe = subprocess.run([ffprobe, "-v", "error", "-select_streams", "a:0",
+                                  "-show_entries", "stream=codec_name",
+                                  "-of", "csv=p=0", str(output)],
+                                 capture_output=True, text=True, check=True, timeout=30)
+    assert audio_probe.stdout.strip() == "aac", "Caption renderer dropped streamer audio"
+    # A valid AAC stream can still be truncated: compare actual decoded audio
+    # duration before and after rendering, allowing one AAC packet of padding.
+    def decoded_audio_seconds(video):
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(video)],
+            capture_output=True, text=True, check=True, timeout=30)
+        return float(result.stdout.strip())
+    source_seconds = decoded_audio_seconds(source)
+    output_seconds = decoded_audio_seconds(output)
+    assert abs(source_seconds - output_seconds) < 0.10, (
+        f"Caption rendering changed audio duration: {source_seconds} -> {output_seconds}"
+    )
+    # Verify decoded samples retain meaningful energy, not just AAC metadata.
+    def audio_rms(video):
+        raw = subprocess.run(
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+             "-i", str(video), "-map", "0:a:0", "-ac", "1",
+             "-ar", "16000", "-f", "s16le", "-"],
+            capture_output=True, check=True, timeout=60).stdout
+        samples = array("h")
+        samples.frombytes(raw)
+        if byteorder != "little":
+            samples.byteswap()
+        assert len(samples) > 16000, "Decoded audio unexpectedly short"
+        return (sum(value * value for value in samples) / len(samples)) ** 0.5
+    source_rms = audio_rms(source)
+    rendered_rms = audio_rms(output)
+    assert source_rms > 10, "Source test audio was silent"
+    assert 0.7 < rendered_rms / source_rms < 1.3, (
+        f"Audio volume changed after rendering: {source_rms} -> {rendered_rms}"
+    )
+    assert output.stat().st_size > 0
+    original = output.read_bytes()
+    try:
+        render_local_clip(source, words, output)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Existing video overwritten")
+    assert output.read_bytes() == original
+    assert source.is_file()
+    bad_output = root / "invalid.mp4"
+    try:
+        render_local_clip(source, [{"text": "BAD", "start": 0.7, "end": 0.2}], bad_output)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Invalid transcript accepted")
+    assert not bad_output.exists(), "Invalid transcript created output"
+    try:
+        render_local_clip(source, words, root / "." / "source.mp4")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Source video overwrite allowed")
+    try:
+        render_local_clip(source, words, root / "not-a-video.mov")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Non-MP4 output extension accepted")
+print("PASS offline MP4 render, audio, invalid timing rejection and overwrite protection")
