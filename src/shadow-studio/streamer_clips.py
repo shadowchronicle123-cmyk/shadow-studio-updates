@@ -1,5 +1,6 @@
 """Rights-aware, offline streamer clip intake. No downloading or publishing."""
 import argparse
+from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
@@ -51,7 +52,7 @@ def queue(manifest, media_root, database):
     validated = [validate(item, media_root) for item in data]
     db_path = Path(database)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db, db:
         db.execute("""CREATE TABLE IF NOT EXISTS clips (
             id INTEGER PRIMARY KEY, creator TEXT NOT NULL, source_url TEXT NOT NULL,
             permission_reference TEXT NOT NULL, license_scope TEXT NOT NULL,
