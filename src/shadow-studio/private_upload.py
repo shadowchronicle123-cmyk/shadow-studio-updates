@@ -179,6 +179,18 @@ def upload(root, day, approved_sha256, token, *, channel_id, confirmed=False, fo
 
 
 def upload_daily(root, day, env, http=requests):
+    # Never let the legacy daily CLI bypass owner-reviewed narration/video.
+    # Verification is repeated here even if a caller used the gated wrapper.
+    from unattended_private_upload import verified_narration_report, verify_approved_video
+    manifest_path = Path(root) / 'renders' / day / 'narration-review.json'
+    if manifest_path.is_symlink():
+        raise ValueError('Symlinked narration review manifest is forbidden')
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise ValueError('Verified narration review manifest is required') from exc
+    verified_narration_report(root, day, manifest)
+    verify_approved_video(root, day)
     if env.get('SHADOW_YOUTUBE_PRIVATE_AUTOMATION') != '1':
         raise ValueError('Private upload automation is disabled')
     audience = env.get('SHADOW_YOUTUBE_AUDIENCE')
