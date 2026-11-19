@@ -1,6 +1,8 @@
 """Offline tests for unattended upload narration gate; no YouTube calls."""
 from array import array
 import math
+import os
+from unittest.mock import patch
 from pathlib import Path
 import tempfile
 import wave
@@ -23,12 +25,21 @@ def main():
         manifest = {"engine": "edge-neural", "voice_id": "en-US-AriaNeural",
                     "listening_review_approved": True,
                     "narration_wav": f"renders/{day}/narration.wav"}
-        assert verified_narration_report(root, day, manifest)["passed"]
+        with patch.dict(os.environ, {"SHADOW_APPROVED_VOICE_IDS": "en-US-AriaNeural"}):
+            assert verified_narration_report(root, day, manifest)["passed"]
+        with patch.dict(os.environ, {"SHADOW_APPROVED_VOICE_IDS": ""}):
+            try:
+                verified_narration_report(root, day, manifest)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Unapproved voice bypassed owner allowlist")
         for key, value in (("engine", "espeak-ng"), ("listening_review_approved", False),
                            ("narration_wav", "../narration.wav")):
             bad = dict(manifest, **{key: value})
             try:
-                verified_narration_report(root, day, bad)
+                with patch.dict(os.environ, {"SHADOW_APPROVED_VOICE_IDS": "en-US-AriaNeural"}):
+                    verified_narration_report(root, day, bad)
             except (ValueError, OSError):
                 pass
             else:
