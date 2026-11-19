@@ -4,7 +4,7 @@ import shutil
 import subprocess
 import tempfile
 
-from local_speech_caption_pipeline import transcribe_and_render
+from local_speech_caption_pipeline import transcribe_and_render, probe_clip_duration
 
 ffmpeg = shutil.which("ffmpeg")
 ffprobe = shutil.which("ffprobe")
@@ -31,6 +31,7 @@ with tempfile.TemporaryDirectory() as directory:
                     "-f", "lavfi", "-i", "sine=frequency=440:duration=1.2",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
                     "-shortest", str(source)], check=True, timeout=60)
+    assert 1.0 < probe_clip_duration(source) < 1.5
     assert Path(transcribe_and_render(source, target, model_dir,
                                      model_factory=LocalOnlyModel)).is_file()
     streams = subprocess.run([ffprobe, "-v", "error", "-show_entries",
@@ -71,6 +72,25 @@ with tempfile.TemporaryDirectory() as directory:
     else:
         raise AssertionError("Overlapping ASR timestamps rendered a video")
     assert not overlap_output.exists(), "Bad ASR timestamps left a rendered artifact"
+    class BeyondDurationModel(LocalOnlyModel):
+        def transcribe(self, source, **kwargs):
+            return iter([{"words": [{"word": "late", "start": 1.0,
+                                      "end": 4.0}]}]), None
+    late_output = root / "late-should-not-render.mp4"
+    try:
+        transcribe_and_render(source, late_output, model_dir,
+                              model_factory=BeyondDurationModel)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Caption after clip duration was accepted")
+    assert not late_output.exists()
+    try:
+        probe_clip_duration(root / "missing.mp4")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Invalid media duration was accepted")
     class MustNotInitialize:
         def __init__(self, *args, **kwargs):
             raise AssertionError("Expensive ASR initialized before input preflight")
