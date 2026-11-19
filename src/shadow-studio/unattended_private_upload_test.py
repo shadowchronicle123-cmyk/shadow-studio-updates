@@ -7,7 +7,8 @@ from unittest.mock import patch
 from pathlib import Path
 import tempfile
 import wave
-from unattended_private_upload import verified_narration_report
+from unattended_private_upload import verified_narration_report, verify_approved_video
+from production_worker import ledger
 
 
 def main():
@@ -65,6 +66,32 @@ def main():
                 pass
             else:
                 raise AssertionError("Different narration bypassed exact-audio approval")
+        # The verified video must be the exact reviewed MP4, not just a valid WAV.
+        mp4 = folder / "short.mp4"
+        mp4.write_bytes(b"synthetic private-upload approval fixture")
+        digest = hashlib.sha256(mp4.read_bytes()).hexdigest()
+        with ledger(root) as db:
+            db.execute("INSERT INTO jobs(day,state,idea_hash,voice,clip,artifact) VALUES (?,?,?,?,?,?)",
+                       (day, "ready", "fixture-idea", "en-us,en-gb", "fixture.mp4",
+                        f"renders/{day}/short.mp4"))
+            db.execute("INSERT INTO verified_exports(day,sha256) VALUES (?,?)", (day,digest))
+        with patch.dict(os.environ, {"SHADOW_APPROVED_VIDEO_SHA256": digest}):
+            assert verify_approved_video(root,day) == digest
+        with patch.dict(os.environ, {"SHADOW_APPROVED_VIDEO_SHA256": "0" * 64}):
+            try:
+                verify_approved_video(root,day)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Wrong video approval accepted")
+        mp4.write_bytes(b"tampered export")
+        with patch.dict(os.environ, {"SHADOW_APPROVED_VIDEO_SHA256": digest}):
+            try:
+                verify_approved_video(root,day)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Tampered video accepted")
     print("PASS unattended private-upload entrypoint rejects robotic and unreviewed narration")
 
 
