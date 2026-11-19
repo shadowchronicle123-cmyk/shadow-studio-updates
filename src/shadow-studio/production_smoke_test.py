@@ -32,6 +32,12 @@ def main():
     print('Shadow Studio — offline export smoke test')
     assert shutil.which('ffmpeg'), 'FFmpeg not installed or missing from PATH'
     assert shutil.which('ffprobe'), 'FFprobe not installed or missing from PATH'
+    dialogue = [(1, 2.4)] * 10
+    holds = renderer.dialogue_holds(dialogue, .5, 2.25, 45)
+    assert sum(holds)+300 == 1350
+    assert min(renderer.dialogue_holds(dialogue, .5, 2.25, 30)) >= 75
+    assert max(renderer.dialogue_holds(dialogue, .5, 2.25, 60)) <= 120
+    print('PASS target fitting preserves manual pauses and bounds adjustments')
     original_voice = renderer.create_voice
     renderer.create_voice = synthetic_voice
     try:

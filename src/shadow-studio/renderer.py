@@ -226,8 +226,37 @@ def preview_layout(story, index, style, *, show_gameplay=False, background=None,
 SCENE_PACING = {"snappy": (0.2, 1.2), "normal": (0.5, 2.25), "deliberate": (0.85, 2.6)}
 
 
+def dialogue_holds(narration, gap, minimum_hold, target_seconds=None):
+    """Return scene holds in frames, adjusting only silence when fitting a target."""
+    base = [math.ceil(max(spoken + gap, minimum_hold) * 30) for _, spoken in narration]
+    if target_seconds is None:
+        return base
+    pause_frames = sum(round(pause * 30) for pause, _ in narration)
+    delta = round(target_seconds * 30) - pause_frames - sum(base)
+    if not delta:
+        return base
+    if delta > 0:
+        capacity = [33] * len(base)
+    else:
+        capacity = [max(0, hold - math.ceil((spoken + 0.1) * 30))
+                    for hold, (_, spoken) in zip(base, narration)]
+    available = sum(capacity)
+    if not available:
+        return base
+    change = min(abs(delta), available)
+    sign = 1 if delta > 0 else -1
+    previous, cumulative = 0, 0
+    for index, share in enumerate(capacity):
+        cumulative += share
+        allocated = round(change * cumulative / available)
+        base[index] += sign * (allocated - previous)
+        previous = allocated
+    return base
+
+
+
 def generate(story,output_dir,style='messages',background=None,progress=None,voice='en-US-AriaNeural',second_voice=None,voice_rate=0,resolution='720p',gameplay_start=0,*,pacing='normal',captions=True,
-             music=None,voice_volume=100,music_volume=22):
+             music=None,voice_volume=100,music_volume=22,target_seconds=None):
     gap, minimum_hold = SCENE_PACING[pacing]
     if not isinstance(story, dict) or not isinstance(story.get('lines'), list) or not 1 <= len(story['lines']) <= 24:
         raise ValueError('Story requires 1 to 24 narration scenes')
@@ -245,7 +274,7 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
         from voice_engine import valid_voice
         if not valid_voice(second_voice): raise ValueError('Second character voice is unavailable')
     with tempfile.TemporaryDirectory(prefix='shadow_') as temp:
-        tmp=Path(temp);concat=[]; wavs=[]; durations=[]; narration=[]
+        tmp=Path(temp);concat=[]; wavs=[]; durations=[]; narration=[]; images=[]
         for i,line in enumerate(story['lines']):
             if progress:progress(10+int(i/max(len(story['lines']),1)*45),f'Creating scene {i+1}/{len(story["lines"])}')
             wav=tmp/f'voice_{i:03}.wav'
@@ -259,13 +288,16 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
             with wave.open(str(normalized), 'rb') as pcm:
                 spoken = pcm.getnframes() / pcm.getframerate()
             offset = round(line_pause(line) * 30) / 30
-            hold = math.ceil(max(spoken + gap, minimum_hold) * 30) / 30
-            durations.append(offset + hold)
             narration.append((offset, spoken))
             wavs.append(normalized)
             img=tmp/f'scene_{i:03}.png'
             if background:gameplay_frame(img,story,i,style)
             else:png_frame(img,story,i,style)
+            images.append(img)
+        holds = dialogue_holds(narration, gap, minimum_hold, target_seconds)
+        for i, (img, (offset, _), frames) in enumerate(zip(images, narration, holds)):
+            hold = frames / 30
+            durations.append(offset + hold)
             if offset:
                 previous = tmp / f'scene_{i-1:03}.png'
                 if i == 0:
