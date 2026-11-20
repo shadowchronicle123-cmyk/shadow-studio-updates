@@ -51,6 +51,9 @@ def ledger(root):
             db.execute('''CREATE TABLE IF NOT EXISTS private_uploads (
                 day TEXT PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, state TEXT NOT NULL, video_id TEXT
             )''')
+            columns = {row[1] for row in db.execute('PRAGMA table_info(private_uploads)')}
+            if 'clip_id' not in columns:
+                db.execute('ALTER TABLE private_uploads ADD COLUMN clip_id TEXT')
             db.execute('''CREATE TABLE IF NOT EXISTS verified_exports (
                 day TEXT PRIMARY KEY, sha256 TEXT NOT NULL
             )''')
@@ -74,7 +77,7 @@ def status(root):
                 'jobs':[dict(row) for row in db.execute(
                     '''SELECT jobs.day,jobs.state,title,attempts,progress,message,duration,artifact,
                        private_uploads.state AS upload_state, video_id FROM jobs
-                       LEFT JOIN private_uploads ON jobs.day=private_uploads.day
+                       LEFT JOIN private_uploads ON jobs.day=private_uploads.day AND private_uploads.clip_id IS NULL
                        ORDER BY jobs.day DESC LIMIT 60''')]}
 
 

@@ -1,12 +1,13 @@
 """Explicit, private-only YouTube handoff of a reviewed production artifact."""
 import argparse
-from datetime import date, datetime
+from datetime import date, datetime, timezone as utc_timezone
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import sqlite3
+import subprocess
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -96,8 +97,7 @@ def transfer(http, location, auth, contents, check_stop):
 
 
 def upload(root, day, approved_sha256, token, *, channel_id, confirmed=False, for_kids=None, http=requests):
-    if not confirmed or not token or type(for_kids) is not bool:
-        raise ValueError('Private upload requires explicit approval, an authorized OAuth token, and an audience decision')
+    require_approval(confirmed, token, for_kids)
     day = date.fromisoformat(day).isoformat()
     root = Path(root)
     with ledger(root) as db:
@@ -107,6 +107,56 @@ def upload(root, day, approved_sha256, token, *, channel_id, confirmed=False, fo
     path = root/row['artifact']
     if path.resolve() != root.resolve()/row['artifact']:
         raise ValueError('The verified export location changed')
+    return upload_verified(root, day, path, row['title'], approved_sha256, token,
+                           channel_id=channel_id, for_kids=for_kids, http=http)
+
+
+def require_approval(confirmed, token, for_kids):
+    if not confirmed or not token or type(for_kids) is not bool:
+        raise ValueError('Private upload requires explicit approval, an authorized OAuth token, and an audience decision')
+
+
+def upload_clip(root, projects, clips, clip_id, approved_sha256, token, *, channel_id,
+                confirmed=False, for_kids=None, timezone='UTC', http=requests):
+    """Upload one explicitly approved local clip through the shared daily slot."""
+    from quality_check import analyze
+    from streamer_clips import clip_review
+
+    require_approval(confirmed, token, for_kids)
+    if not re.fullmatch(r'[a-f0-9]{12}', clip_id):
+        raise ValueError('Invalid clip render ID')
+    database = Path(projects)/'streamer-clips.sqlite3'
+    path = Path(clips)/f'{clip_id}.mp4'
+    if path.resolve() != Path(clips).resolve()/path.name:
+        raise ValueError('The verified clip location changed')
+
+    def check_approval():
+        review = clip_review(database, clip_id)
+        if (review is None or review['state'] != 'approved'
+                or review['sha256'] != approved_sha256.lower()
+                or review['license_scope'] not in ('edit-and-repost', 'commercial-edit-and-repost')):
+            raise ValueError('Clip needs a matching approval and edit-and-repost rights')
+        return review
+
+    review = check_approval()
+    if not path.is_file() or path.stat().st_size > MAX_BYTES:
+        raise ValueError('Clip is missing or exceeds the private worker limit')
+    try:
+        quality = analyze(path)
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise ValueError('Clip could not be verified for private upload') from exc
+    if not quality['passed'] or (quality['width'], quality['height']) != (1080, 1920):
+        raise ValueError('Clip failed its current technical checks')
+    clock = utc_timezone.utc if timezone == 'UTC' else ZoneInfo(timezone)
+    day = datetime.now(clock).date().isoformat()
+    creator = ' '.join(review['creator'].split())
+    return upload_verified(root, day, path, f'{creator[:82]} clip #Shorts', approved_sha256, token,
+                           channel_id=channel_id, for_kids=for_kids, http=http, clip_id=clip_id,
+                           check_approval=check_approval)
+
+
+def upload_verified(root, day, path, title, approved_sha256, token, *, channel_id, for_kids,
+                    http, clip_id=None, check_approval=None):
     with path.open('rb') as video:
         contents = video.read(MAX_BYTES+1)
     if not contents or len(contents)>MAX_BYTES:
@@ -128,10 +178,11 @@ def upload(root, day, approved_sha256, token, *, channel_id, confirmed=False, fo
         if db.execute('SELECT stopped FROM control').fetchone()[0]:
             raise ValueError('Production is stopped')
         try:
-            claim = db.execute("""INSERT INTO private_uploads(day,sha256,state) VALUES (?,?,'submitting')
+            claim = db.execute("""INSERT INTO private_uploads(day,sha256,state,clip_id) VALUES (?,?,'submitting',?)
                                ON CONFLICT(day) DO UPDATE SET state='submitting'
-                               WHERE private_uploads.state='retryable' AND private_uploads.sha256=excluded.sha256""",
-                               (day,digest))
+                               WHERE private_uploads.state='retryable' AND private_uploads.sha256=excluded.sha256
+                                 AND private_uploads.clip_id IS excluded.clip_id""",
+                               (day,digest,clip_id))
             if claim.rowcount != 1:
                 raise sqlite3.IntegrityError()
         except sqlite3.IntegrityError:
@@ -143,11 +194,13 @@ def upload(root, day, approved_sha256, token, *, channel_id, confirmed=False, fo
         with ledger(root) as db:
             if db.execute('SELECT stopped FROM control').fetchone()[0]:
                 raise RuntimeError('Production stopped before media transfer')
+        if check_approval:
+            check_approval()
 
     try:
         initialized = http.post(CREATE, params={'uploadType':'resumable','part':'snippet,status'},
             headers={**auth,'X-Upload-Content-Type':'video/mp4','X-Upload-Content-Length':str(len(contents))},
-            json={'snippet':{'title':row['title']},'status':{'privacyStatus':'private','selfDeclaredMadeForKids':for_kids}},
+            json={'snippet':{'title':title},'status':{'privacyStatus':'private','selfDeclaredMadeForKids':for_kids}},
             timeout=(8,30),allow_redirects=False)
         location = initialized.headers.get('Location','')
         parsed = urlsplit(location)
@@ -214,6 +267,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--state',type=Path,required=True)
     parser.add_argument('--day')
+    parser.add_argument('--clip-id')
+    parser.add_argument('--projects',type=Path)
+    parser.add_argument('--clips',type=Path)
     parser.add_argument('--sha256')
     parser.add_argument('--confirm-private',action='store_true')
     parser.add_argument('--audience',choices=('made-for-kids','not-made-for-kids'))
@@ -227,16 +283,26 @@ def main():
             config = Path(directory)/'youtube.json'
         env = os.environ if config is None else read_worker_settings(config)
         if args.daily:
-            if args.day or args.sha256 or args.confirm_private or args.audience:
+            if args.day or args.sha256 or args.confirm_private or args.audience or args.clip_id or args.projects or args.clips:
                 parser.error('--daily cannot be combined with single-video approval options')
             day = datetime.now(ZoneInfo(args.timezone)).date().isoformat()
             result = upload_daily(args.state,day,env)
         else:
-            if not (args.day and args.sha256 and args.confirm_private and args.audience):
-                parser.error('supply --day, --sha256, --confirm-private and --audience')
+            if not (args.sha256 and args.confirm_private and args.audience):
+                parser.error('supply --sha256, --confirm-private and --audience')
+            if args.clip_id:
+                if args.day or not (args.projects and args.clips):
+                    parser.error('clip uploads require --projects and --clips and use the current day')
+            elif not args.day or args.projects or args.clips:
+                parser.error('supply --day for a story upload or --clip-id for a clip')
             token = env.get('SHADOW_YOUTUBE_ACCESS_TOKEN') or refresh_access_token(env)
-            result = upload(args.state,args.day,args.sha256,token,channel_id=env.get('SHADOW_YOUTUBE_CHANNEL_ID'),
-                            confirmed=True,for_kids=args.audience=='made-for-kids')
+            options = dict(channel_id=env.get('SHADOW_YOUTUBE_CHANNEL_ID'),
+                           confirmed=True, for_kids=args.audience=='made-for-kids')
+            if args.clip_id:
+                result = upload_clip(args.state,args.projects,args.clips,args.clip_id,args.sha256,token,
+                                     timezone=args.timezone,**options)
+            else:
+                result = upload(args.state,args.day,args.sha256,token,**options)
     except RetryableUpload as exc:
         print('Private upload blocked:', exc)
         return 75

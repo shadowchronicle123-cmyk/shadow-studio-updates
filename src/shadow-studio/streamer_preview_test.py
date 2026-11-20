@@ -6,12 +6,16 @@ import json
 import subprocess
 import tempfile
 import zipfile
-from unittest.mock import patch
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 import app
 from quality_check import analyze
 from streamer_clips import make_preview
+from private_upload import upload, upload_clip
+from production_worker import ledger, set_stop
 
 
 def main():
@@ -63,6 +67,44 @@ def main():
                 assert manifest['sha256'] == hashlib.sha256(path.read_bytes()).hexdigest()
                 assert manifest['channel'] == 'ShadowChronicles' and manifest['visibility'] == 'private'
                 assert 'permission_reference' not in manifest and 'source_url' not in manifest
+            worker = root/'worker'
+            channel = 'UC'+'Z'*22
+            network = Mock()
+            network.get.return_value = SimpleNamespace(status_code=200,json=lambda:{'items':[{'id':channel}]})
+            network.post.return_value = SimpleNamespace(status_code=200,headers={
+                'Location':'https://www.googleapis.com/upload/youtube/v3/videos?upload_id=test'})
+            network.put.return_value = SimpleNamespace(status_code=201,json=lambda:{
+                'id':'example1234','snippet':{'channelId':channel},'status':{'privacyStatus':'private'}})
+            args = (worker, root/'projects', previews, rows[0]['video_id'], manifest['sha256'], 'fixture-token')
+            options = dict(channel_id=channel, for_kids=False, http=network)
+
+            def expect_blocked(action):
+                try:
+                    action()
+                except ValueError:
+                    return
+                raise AssertionError('Expected private upload to be blocked')
+
+            expect_blocked(lambda: upload_clip(*args, **options))
+            set_stop(worker, True)
+            expect_blocked(lambda: upload_clip(*args, confirmed=True, **options))
+            network.post.assert_not_called()
+            set_stop(worker, False)
+            assert upload_clip(*args, confirmed=True, **options) == 'example1234'
+            assert network.post.call_args.kwargs['json']['status']['privacyStatus'] == 'private'
+            assert network.put.call_args.kwargs['data'] == path.read_bytes()
+            expect_blocked(lambda: upload_clip(*args, confirmed=True, **options))
+            day = datetime.now(timezone.utc).date().isoformat()
+            story = worker/'renders'/day/'short.mp4'
+            story.parent.mkdir(parents=True)
+            story.write_bytes(b'unique story fixture')
+            with ledger(worker) as db:
+                db.execute("""INSERT INTO jobs(day,state,idea_hash,title,voice,clip,artifact)
+                              VALUES (?,'ready','unique','Story','offline','fixture',?)""",
+                           (day,f'renders/{day}/short.mp4'))
+            expect_blocked(lambda: upload(worker,day,hashlib.sha256(story.read_bytes()).hexdigest(),
+                                          'fixture-token',confirmed=True,**options))
+            network.post.assert_called_once()
             original = path.read_bytes()
             path.write_bytes(b'changed before handoff')
             assert client.get(handoff_url).status_code == 409

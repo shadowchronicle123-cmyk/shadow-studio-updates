@@ -55,3 +55,23 @@ references and original source URLs remain in the local rights ledger.
 The ZIP is a local deliverable. The production uploader continues to accept
 only verified story exports. A future clip transfer must add server-side
 approval, cross-format duplicate protection and explicit private upload consent.
+
+## Private clip worker checkpoint
+
+The existing private-only uploader now accepts a local approved clip ID,
+explicit checksum and audience, and uses the same persisted daily slot as
+story uploads. It checks recorded edit-and-repost rights and current technical
+quality, and rechecks approval before initial or resumed transfer. The
+trusted local review database is required. A ZIP alone grants no authority.
+
+For a manually approved test on the worker host, use
+`python private_upload.py --state WORKER_STATE --credentials LOCAL_YOUTUBE_JSON --clip-id VIDEO_ID --projects PROJECTS_FOLDER --clips CLIPS_FOLDER --sha256 REVIEWED_SHA256 --confirm-private --audience AUDIENCE --timezone WORKER_TIMEZONE`.
+Use the real audience classification and the worker's existing scheduling
+timezone. Keep credentials on the worker host. This command is not connected
+to the unattended timer. Story jobs retain their existing workflow.
+
+The one-slot-per-day cap is shared across clip and story transfers for the
+same ledger day. Higher-volume scheduling and independent QA quota estimates
+are not wired to live uploads. The Netlify OAuth start route returned 401
+from the development environment. Live Google worker credentials and a
+licensed production source were unavailable in that environment.
