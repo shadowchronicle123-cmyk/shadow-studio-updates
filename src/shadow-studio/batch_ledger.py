@@ -32,10 +32,10 @@ def transaction(path):
     try:
         db.execute("PRAGMA busy_timeout=10000")
         db.execute("BEGIN IMMEDIATE")
-        for statement in SCHEMA.split(";"):
-            if statement.strip():
-                db.execute(statement)
         try:
+            for statement in SCHEMA.split(";"):
+                if statement.strip():
+                    db.execute(statement)
             yield db
             db.execute("COMMIT")
         except BaseException:
@@ -58,11 +58,12 @@ def set_stop(path, stopped):
         audit(db, "emergency_stop" if stopped else "manual_resume_required")
 
 
-def register_rights(path, fingerprint, evidence_reference, *, authorized=False):
+def register_rights(path, fingerprint, evidence_reference, *, authorized=False, reviewer_reference=None):
     """Record a trusted reviewer decision; arbitrary caller claims are not sufficient."""
     if (not isinstance(fingerprint, str) or len(fingerprint) != 64
             or any(c not in "0123456789abcdef" for c in fingerprint)
             or not isinstance(evidence_reference, str) or not evidence_reference.strip()
+            or not isinstance(reviewer_reference, str) or not reviewer_reference.strip()
             or type(authorized) is not bool):
         raise ValueError("Invalid rights evidence")
     with transaction(path) as db:
@@ -72,7 +73,7 @@ def register_rights(path, fingerprint, evidence_reference, *, authorized=False):
                       authorized=excluded.authorized""",
                    (fingerprint, evidence_reference.strip(), int(authorized)))
         audit(db, "rights_review", fingerprint=fingerprint,
-              detail="approved" if authorized else "denied")
+              detail=("approved:" if authorized else "denied:") + reviewer_reference.strip())
 
 
 def reserve(path, *, day, fingerprint, kind, permission_verified=False,
