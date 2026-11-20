@@ -86,5 +86,25 @@ class ReviewTests(unittest.TestCase):
             dispatch_due(self.root, {}, audience="not-made-for-kids")
 
 
+    def test_three_scheduled_uploads_per_utc_day(self):
+        review(self.root,"2026-11-20",1,"approve")
+        review(self.root,"2026-11-20",1,"schedule",at="2035-11-22T14:00:00-05:00")
+        for index in range(2,5):
+            path = self.root / f"clip-{index}.mp4"
+            path.write_bytes(f"fixture-{index}".encode())
+            day = f"2026-11-{20+index:02d}"
+            slot = register(self.root,day,path,"Approved gameplay",
+                "Documented edit and repost permission",
+                hashlib.sha256(path.read_bytes()).hexdigest())
+            review(self.root,day,slot,"approve")
+            if index < 4:
+                self.assertEqual(review(self.root,day,slot,"schedule",
+                                 at="2035-11-22T17:00:00Z")["state"],"scheduled")
+            else:
+                with self.assertRaisesRegex(ValueError,"Three private handoffs"):
+                    review(self.root,day,slot,"schedule",at="2035-11-22T17:00:00Z")
+
+
+
 if __name__ == "__main__":
     unittest.main()
