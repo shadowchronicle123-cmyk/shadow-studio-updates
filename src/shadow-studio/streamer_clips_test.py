@@ -62,6 +62,20 @@ def main():
         assert result == fresh_output / "preview.mp4"
         assert result.read_bytes() == b"offline rendered fixture"
         assert not list(fresh_output.glob("checked-clip-*"))
+        # A source changed after rights intake must not overwrite a prior preview.
+        (media / "clip.mp4").write_bytes(b"tampered source")
+        with patch.dict(sys.modules, {
+            "advanced_tools": duration, "quality_check": quality,
+            "studio_tools": studio,
+        }):
+            try:
+                make_preview(database, 1, fresh_output)
+            except ValueError as exc:
+                assert "changed after rights intake" in str(exc)
+            else:
+                raise AssertionError("Tampered source was rendered")
+        assert result.read_bytes() == b"offline rendered fixture"
+        (media / "clip.mp4").write_bytes(b"local fixture")
         for update in ({"permission_reference": ""}, {"license_scope": "unknown"},
                        {"file": "../clips.json"}, {"end_seconds": 500},
                        {"source_url": "https://example.com/video"}):
