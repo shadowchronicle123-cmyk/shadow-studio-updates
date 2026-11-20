@@ -75,3 +75,11 @@ same ledger day. Higher-volume scheduling and independent QA quota estimates
 are not wired to live uploads. The Netlify OAuth start route returned 401
 from the development environment. Live Google worker credentials and a
 licensed production source were unavailable in that environment.
+
+The daily worker can also prefer already approved local clips over a ready
+story with `SHADOW_YOUTUBE_APPROVED_CLIPS_FIRST=1` and absolute trusted
+`SHADOW_YOUTUBE_PROJECTS_DIR` and `SHADOW_YOUTUBE_CLIPS_DIR` settings. This
+also requires the existing private-automation opt-in. Deduplication spans
+both formats. A retry stays with its original asset and an uncertain
+transfer blocks the day. With no eligible candidate, a verified story
+can fill the slot. No values or timers were enabled in production.

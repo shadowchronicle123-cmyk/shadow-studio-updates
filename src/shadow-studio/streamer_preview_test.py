@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 import app
 from quality_check import analyze
 from streamer_clips import make_preview
-from private_upload import upload, upload_clip
+from private_upload import TOKEN, upload, upload_clip, upload_daily
 from production_worker import ledger, set_stop
 
 
@@ -105,6 +105,32 @@ def main():
             expect_blocked(lambda: upload(worker,day,hashlib.sha256(story.read_bytes()).hexdigest(),
                                           'fixture-token',confirmed=True,**options))
             network.post.assert_called_once()
+            scheduled = root/'scheduled'
+            env = {'SHADOW_YOUTUBE_APPROVED_CLIPS_FIRST':'1',
+                   'SHADOW_YOUTUBE_PROJECTS_DIR':str(root/'projects'),
+                   'SHADOW_YOUTUBE_CLIPS_DIR':str(previews),
+                   'SHADOW_YOUTUBE_CHANNEL_ID':channel,
+                   'SHADOW_YOUTUBE_AUDIENCE':'not-made-for-kids',
+                   'SHADOW_YOUTUBE_CLIENT_ID':'fixture-client',
+                   'SHADOW_YOUTUBE_CLIENT_SECRET':'fixture-secret',
+                   'SHADOW_YOUTUBE_REFRESH_TOKEN':'fixture-refresh'}
+            network.reset_mock()
+            expect_blocked(lambda: upload_daily(scheduled,day,env,network))
+            network.post.assert_not_called()
+            env['SHADOW_YOUTUBE_PRIVATE_AUTOMATION'] = '1'
+            initialized = network.post.return_value
+            network.post.side_effect = lambda url, **kw: (
+                SimpleNamespace(status_code=200,json=lambda:{'token_type':'bearer','access_token':'fixture'})
+                if url == TOKEN else initialized)
+            with ledger(scheduled) as db:
+                db.execute("""INSERT INTO jobs(day,state,idea_hash,title,voice,clip,artifact)
+                              VALUES (?,'ready','scheduled-story','Story','offline','fixture',?)""",
+                           (day,f'renders/{day}/short.mp4'))
+                db.execute('INSERT INTO verified_exports VALUES (?,?)',(day, '0'*64))
+            assert upload_daily(scheduled,day,env,network) == 'example1234'
+            assert network.put.call_args.kwargs['data'] == path.read_bytes()
+            assert upload_daily(scheduled,day,env,network) == 'private'
+            network.put.assert_called_once()
             original = path.read_bytes()
             path.write_bytes(b'changed before handoff')
             assert client.get(handoff_url).status_code == 409

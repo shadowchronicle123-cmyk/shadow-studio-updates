@@ -118,6 +118,14 @@ def require_approval(confirmed, token, for_kids):
 
 def upload_clip(root, projects, clips, clip_id, approved_sha256, token, *, channel_id,
                 confirmed=False, for_kids=None, timezone='UTC', http=requests):
+    clock = utc_timezone.utc if timezone == 'UTC' else ZoneInfo(timezone)
+    day = datetime.now(clock).date().isoformat()
+    return upload_approved_clip(root, day, projects, clips, clip_id, approved_sha256, token,
+                                channel_id=channel_id, confirmed=confirmed, for_kids=for_kids, http=http)
+
+
+def upload_approved_clip(root, day, projects, clips, clip_id, approved_sha256, token, *,
+                         channel_id, confirmed, for_kids, http):
     """Upload one explicitly approved local clip through the shared daily slot."""
     from quality_check import analyze
     from streamer_clips import clip_review
@@ -147,8 +155,6 @@ def upload_clip(root, projects, clips, clip_id, approved_sha256, token, *, chann
         raise ValueError('Clip could not be verified for private upload') from exc
     if not quality['passed'] or (quality['width'], quality['height']) != (1080, 1920):
         raise ValueError('Clip failed its current technical checks')
-    clock = utc_timezone.utc if timezone == 'UTC' else ZoneInfo(timezone)
-    day = datetime.now(clock).date().isoformat()
     creator = ' '.join(review['creator'].split())
     return upload_verified(root, day, path, f'{creator[:82]} clip #Shorts', approved_sha256, token,
                            channel_id=channel_id, for_kids=for_kids, http=http, clip_id=clip_id,
@@ -237,20 +243,49 @@ def upload_daily(root, day, env, http=requests):
     audience = env.get('SHADOW_YOUTUBE_AUDIENCE')
     if audience not in ('made-for-kids', 'not-made-for-kids'):
         raise ValueError('Configure the audience for private automation')
+    day = date.fromisoformat(day).isoformat()
+    channel = env.get('SHADOW_YOUTUBE_CHANNEL_ID')
+    for_kids = audience == 'made-for-kids'
+    clips_first = env.get('SHADOW_YOUTUBE_APPROVED_CLIPS_FIRST') == '1'
     with ledger(root) as db:
         if db.execute('SELECT stopped FROM control').fetchone()[0]:
             return 'stopped'
+        prior = db.execute('SELECT state,clip_id,sha256 FROM private_uploads WHERE day=?',(day,)).fetchone()
+        if prior and prior['state'] != 'retryable':
+            return prior['state']
         row = db.execute("""SELECT verified_exports.sha256, private_uploads.state AS upload_state
                            FROM jobs JOIN verified_exports USING (day)
                            LEFT JOIN private_uploads USING (day) WHERE day=? AND jobs.state='ready'""",
                          (day,)).fetchone()
+        used = {entry[0] for entry in db.execute('SELECT sha256 FROM private_uploads')} if clips_first else set()
+    if clips_first and (prior is None or prior['clip_id'] is not None):
+        from streamer_clips import approved_clip_candidates
+        projects = env.get('SHADOW_YOUTUBE_PROJECTS_DIR')
+        clips = env.get('SHADOW_YOUTUBE_CLIPS_DIR')
+        if not projects or not clips:
+            raise ValueError('Configure the trusted clip review and render directories for clips-first')
+        if not Path(projects).is_dir() or not Path(clips).is_dir():
+            raise ValueError('Configured clip directories are unavailable')
+        candidates = approved_clip_candidates(Path(projects)/'streamer-clips.sqlite3')
+        if prior:
+            chosen = next((item for item in candidates if (item['video_id'],item['sha256']) ==
+                           (prior['clip_id'],prior['sha256'])), None)
+            if chosen is None:
+                return 'clip_review_required'
+        else:
+            chosen = next((item for item in candidates if item['sha256'] not in used), None)
+        if chosen:
+            token = refresh_access_token(env, http)
+            return upload_approved_clip(root,day,projects,clips,chosen['video_id'],chosen['sha256'],token,
+                                        channel_id=channel,confirmed=True,for_kids=for_kids,http=http)
+    elif prior and prior['clip_id'] is not None:
+        return 'clip_review_required'
     if row is None:
         return 'no_verified_export_today'
     if row['upload_state'] not in (None, 'retryable'):
         return row['upload_state']
     token = refresh_access_token(env, http)
-    return upload(root,day,row['sha256'],token,channel_id=env.get('SHADOW_YOUTUBE_CHANNEL_ID'),
-                  confirmed=True,for_kids=audience=='made-for-kids',http=http)
+    return upload(root,day,row['sha256'],token,channel_id=channel,confirmed=True,for_kids=for_kids,http=http)
 
 
 def read_worker_settings(path):

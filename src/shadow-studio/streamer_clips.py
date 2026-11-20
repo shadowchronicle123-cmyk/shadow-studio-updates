@@ -171,6 +171,19 @@ def clip_review(database, video_id):
         """, (video_id,)).fetchone()
 
 
+def approved_clip_candidates(database):
+    if not database.is_file():
+        return []
+    with rendered_reviews(database) as db:
+        return db.execute("""
+            SELECT r.video_id,r.sha256 FROM rendered_reviews r
+            JOIN clips c ON c.id=r.clip_id
+            WHERE r.state='approved'
+              AND c.license_scope IN ('edit-and-repost','commercial-edit-and-repost')
+            ORDER BY r.rowid
+        """).fetchall()
+
+
 def decide_review(database, output_dir, video_id, decision):
     if not database.is_file():
         raise FileNotFoundError()
