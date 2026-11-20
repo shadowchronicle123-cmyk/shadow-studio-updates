@@ -63,6 +63,7 @@ jobs:
             'update_manager_test.py',
             'migration_acceptance_test.py',
             'windows_voice_test.py',
+            'pc_acceptance_test.py',
             'production_worker_test.py',
             'private_upload_test.py',
             'streamer_preview_test.py',
@@ -83,6 +84,10 @@ jobs:
         shell: cmd
         run: |
           python -m venv --system-site-packages .venv
+          if errorlevel 1 exit /b 1
+          set "TEMP=%RUNNER_TEMP%\Shadow Studio acceptance"
+          set "TMP=%TEMP%"
+          mkdir "%TEMP%"
           if errorlevel 1 exit /b 1
           call test_windows.bat /nopause
       - name: Parse Windows Task Scheduler installer without installing tasks
@@ -142,6 +147,7 @@ jobs:
           python update_manager_test.py
           python migration_acceptance_test.py
           python production_worker_test.py --real
+          python pc_acceptance_test.py
           python pc_acceptance.py
           python private_upload_test.py
           python streamer_preview_test.py

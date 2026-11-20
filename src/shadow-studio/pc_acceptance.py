@@ -1,5 +1,6 @@
 """Produce one isolated offline sample and a readable acceptance report."""
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -8,9 +9,14 @@ import tempfile
 import sys
 
 
+MIN_FREE_BYTES = 1024 ** 3
+
+
 def run(root):
     if sys.version_info < (3, 11):
         raise RuntimeError("Python 3.11 or newer is required.")
+    if shutil.disk_usage(root).free < MIN_FREE_BYTES:
+        raise RuntimeError("The temporary folder needs at least 1 GiB of free space.")
     for executable in ("ffmpeg", "ffprobe"):
         if not shutil.which(executable):
             raise RuntimeError(f"{executable} is missing from PATH. Open a new terminal after installing FFmpeg.")
@@ -32,6 +38,13 @@ def run(root):
                       voice_factory=None if os.name == "nt" else local_narration)
     quality = _check_export(result)
     video = Path(result["path"])
+    streams = json.loads(subprocess.check_output(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,duration", "-of", "json", str(video)],
+        timeout=20))["streams"]
+    durations = {stream["codec_type"]: float(stream["duration"]) for stream in streams
+                 if stream["codec_type"] in ("audio", "video")}
+    if durations.keys() != {"audio", "video"} or not abs(durations["audio"]-durations["video"]) <= .10:
+        raise ValueError("Audio and video track lengths differ by more than 0.10 seconds.")
     with video.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     return [
@@ -40,7 +53,8 @@ def run(root):
         f"PASS {quality['width']}x{quality['height']} at {quality['fps']} FPS, "
         f"{quality['duration_seconds']} seconds, non-silent audio",
         f"PASS {len(read_captions(result['captions_path']))} timed cues and media integrity",
-        f"MP4: {video.name}",
+        "PASS Audio and video track lengths match within 0.10 seconds",
+        f"MP4: sample/{video.name}",
         f"SHA-256: {digest}",
         *(f"Review warning: {warning}" for warning in quality["warnings"]),
         "Manual review: play the MP4 and check caption readability, speech timing and pacing.",
@@ -55,12 +69,20 @@ def main():
         return 1
     print(f"Acceptance output: {root}", flush=True)
     try:
-        lines = run(root)
+        with tempfile.TemporaryDirectory(prefix="render staging ", dir=root) as staging:
+            work = Path(staging) / "sample"
+            work.mkdir()
+            lines = run(work)
+            (work / "test-background.mp4").unlink()
+            work.rename(root / "sample")
         code = 0
+    except KeyboardInterrupt:
+        lines = ["CANCELLED The sample was interrupted. Run the launcher again for a fresh attempt."]
+        code = 130
     except ModuleNotFoundError as exc:
         lines = [f"FAIL Missing Python dependency: {exc.name}. Use the separately prepared test install."]
         code = 1
-    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+    except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError) as exc:
         lines = [f"FAIL {exc}"]
         code = 1
     lines.append("Separate checks: application startup, update rollback, and Windows Task Scheduler.")
