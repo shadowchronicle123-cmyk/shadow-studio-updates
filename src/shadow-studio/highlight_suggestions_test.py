@@ -1,5 +1,6 @@
 """Offline real-FFmpeg highlight acceptance; never accesses the internet."""
 import hashlib
+from contextlib import closing
 from pathlib import Path
 import shutil
 import sqlite3
@@ -47,7 +48,7 @@ class HighlightTests(unittest.TestCase):
         two=generate(self.db,self.clip_id)
         self.assertEqual([x["id"] for x in one["suggestions"]],
                          [x["id"] for x in two["suggestions"]])
-        with sqlite3.connect(self.db) as db:
+        with closing(sqlite3.connect(self.db)) as db, db:
             count=db.execute("SELECT count(*) FROM clip_suggestions").fetchone()[0]
         self.assertEqual(count,len(one["suggestions"]))
 
@@ -57,7 +58,7 @@ class HighlightTests(unittest.TestCase):
             generate(self.db,self.clip_id)
 
     def test_non_editing_license_rejected(self):
-        with sqlite3.connect(self.db) as db:
+        with closing(sqlite3.connect(self.db)) as db, db:
             db.execute("UPDATE clips SET license_scope='repost' WHERE id=?",(self.clip_id,))
         with self.assertRaisesRegex(ValueError,"Editing and reposting"):
             generate(self.db,self.clip_id)
