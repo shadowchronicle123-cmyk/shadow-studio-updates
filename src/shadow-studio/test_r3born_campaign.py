@@ -33,6 +33,15 @@ class CampaignTests(unittest.TestCase):
             self.register(3)
         self.assertEqual(self.register(3, "2026-11-20"), 1)
 
+    def test_registration_after_schema_initialization(self):
+        # campaign_db creates and commits the table before register's write transaction.
+        self.assertEqual(self.register(0), 1)
+        self.assertEqual(self.register(1), 2)
+        with campaign_db(self.root) as db:
+            rows = db.execute("SELECT slot,state FROM r3born_uploads ORDER BY slot").fetchall()
+        self.assertEqual([(r["slot"],r["state"]) for r in rows],
+                         [(1,"reviewed"),(2,"reviewed")])
+
     def test_duplicate_and_required_description(self):
         self.register(0)
         with self.assertRaisesRegex(ValueError, "already been registered"):
