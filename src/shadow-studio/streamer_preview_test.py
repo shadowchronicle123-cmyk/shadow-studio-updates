@@ -1,7 +1,11 @@
 """Exercise the rights-aware preview API with real local media."""
 from pathlib import Path
+import hashlib
+import io
+import json
 import subprocess
 import tempfile
+import zipfile
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -46,10 +50,26 @@ def main():
             assert rows[0]['creator'] == item['creator']
             assert 'permission_reference' not in rows[0] and 'file' not in rows[0]
             decision_url = review_url + '/' + rows[0]['video_id']
+            handoff_url = '/api/streamer-clips/handoff/' + rows[0]['video_id']
+            assert client.get(handoff_url).status_code == 409
             assert client.post(decision_url,json={'decision':'published'}).status_code == 422
             assert client.post(decision_url,json={'decision':'approved'}).status_code == 200
+            handoff = client.get(handoff_url)
+            assert handoff.status_code == 200, handoff.text
+            with zipfile.ZipFile(io.BytesIO(handoff.content)) as archive:
+                assert set(archive.namelist()) == {'short.mp4', 'manifest.json', 'README.txt'}
+                manifest = json.loads(archive.read('manifest.json'))
+                assert archive.read('short.mp4') == path.read_bytes()
+                assert manifest['sha256'] == hashlib.sha256(path.read_bytes()).hexdigest()
+                assert manifest['channel'] == 'ShadowChronicles' and manifest['visibility'] == 'private'
+                assert 'permission_reference' not in manifest and 'source_url' not in manifest
+            original = path.read_bytes()
+            path.write_bytes(b'changed before handoff')
+            assert client.get(handoff_url).status_code == 409
+            path.write_bytes(original)
             assert TestClient(app.app).get(review_url).json()[0]['state'] == 'approved'
             assert client.post(decision_url,json={'decision':'rejected'}).status_code == 200
+            assert client.get(handoff_url).status_code == 409
             path.write_bytes(b'changed rendered clip')
             assert client.post(decision_url,json={'decision':'approved'}).status_code == 409
             assert client.get(review_url).json()[0]['state'] == 'rejected'

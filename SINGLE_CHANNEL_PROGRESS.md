@@ -43,3 +43,15 @@ Clip decisions are local review metadata. The existing uploader still accepts
 its own verified story exports only. Scheduled clip production, live
 transcription, clip analytics, and hosted dashboard access remain open. This
 change uses neither a paid provider nor YouTube credentials.
+
+## Approved clip handoff
+
+An approved clip can be downloaded as a private handoff ZIP from Daily
+Production. The app re-runs the technical check, verifies the exact approved
+bytes while writing the archive, and includes a private ShadowChronicles
+manifest with content type, creator, clip range and digest. Permission
+references and original source URLs remain in the local rights ledger.
+
+The ZIP is a local deliverable. The production uploader continues to accept
+only verified story exports. A future clip transfer must add server-side
+approval, cross-format duplicate protection and explicit private upload consent.

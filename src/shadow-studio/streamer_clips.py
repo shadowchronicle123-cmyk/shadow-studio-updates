@@ -161,6 +161,16 @@ def recent_reviews(database):
         """)]
 
 
+def clip_review(database, video_id):
+    if not database.is_file():
+        return None
+    with rendered_reviews(database) as db:
+        return db.execute("""
+            SELECT r.state,r.sha256,c.creator,c.license_scope,c.start_seconds,c.end_seconds
+            FROM rendered_reviews r JOIN clips c ON c.id=r.clip_id WHERE r.video_id=?
+        """, (video_id,)).fetchone()
+
+
 def decide_review(database, output_dir, video_id, decision):
     if not database.is_file():
         raise FileNotFoundError()
