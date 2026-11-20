@@ -4,16 +4,18 @@ No network API, remote footage download or YouTube publishing occurs here.
 Story rendering is delegated to the existing production_worker.run_day.
 """
 import argparse
+import hashlib
 from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 import json
+import re
 from pathlib import Path
 import sqlite3
 import threading
 import time
 import uuid
 
-KINDS = {"story_day", "health_check"}
+KINDS = {"story_day", "health_check", "highlight_scan"}
 MAX_ATTEMPTS = 3
 HEARTBEAT_SECONDS = 15
 
@@ -61,6 +63,17 @@ def enqueue(root, kind, key, payload, *, now=None, max_attempts=MAX_ATTEMPTS):
         date.fromisoformat(payload["day"])
         if key != "story:" + payload["day"]:
             raise ValueError("Story deduplication key must be the production day")
+    elif kind == "highlight_scan":
+        if (type(payload.get("clip_id")) is not int or payload["clip_id"] <= 0
+            or not isinstance(payload.get("clip_database"), str)
+            or not payload["clip_database"]
+            or not isinstance(payload.get("source_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}",payload["source_sha256"])):
+            raise ValueError("Highlight scan requires a registered clip ID, database and SHA-256")
+        expected = hashlib.sha256((str(Path(payload["clip_database"]).resolve())
+                + "|" + str(payload["clip_id"]) + "|" + payload["source_sha256"]).encode("utf-8")).hexdigest()
+        if key != "highlight:" + expected:
+            raise ValueError("Highlight deduplication key differs from approved source")
     elif payload:
         raise ValueError("Health-check payload must be empty")
     with database(root) as db:
@@ -169,6 +182,13 @@ def _run_original(root, job):
         result = inspect(root)
         if result["status"] == "unknown":
             raise OSError("health_unavailable")
+        return "checked"
+    if job["kind"] == "highlight_scan":
+        from highlight_suggestions import generate
+        item = job["payload"]
+        result = generate(item["clip_database"],item["clip_id"])
+        if result["source_sha256"] != item["source_sha256"]:
+            raise ValueError("Licensed source SHA-256 differs from queued approval")
         return "checked"
     if job["kind"] != "story_day":
         raise ValueError("Unsupported job")
