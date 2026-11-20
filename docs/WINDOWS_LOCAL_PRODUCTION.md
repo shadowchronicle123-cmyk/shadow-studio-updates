@@ -144,3 +144,11 @@ For rollback from this acceptance test, close the test copy and reopen the
 original installation. Retain the extracted test copy and sample until review
 is complete. The existing updater's simulated upgrade and failed-install
 rollback are exercised separately by `migration_acceptance_test.py`.
+
+The acceptance output folder contains `acceptance-report.txt` and, after
+successful validation, `sample\short.mp4` and `sample\captions.srt`. The
+launcher checks free space before rendering and reports missing tools,
+dependencies, or write permission. Press Ctrl+C to cancel a normal run, then
+use the same launcher for a fresh attempt. A hard shutdown can leave a render
+staging folder inside that attempt's temporary directory. Only the completed
+`sample` folder is meant for review.
