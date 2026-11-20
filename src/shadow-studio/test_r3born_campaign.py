@@ -121,5 +121,56 @@ class CampaignTests(unittest.TestCase):
                               self.root/"x.mp4","0"*64)
 
 
+    def test_scheduled_private_upload_blocks_before_due(self):
+        self.register(0)
+        digest = hashlib.sha256(self.files[0].read_bytes()).hexdigest()
+        with campaign_db(self.root) as db:
+            db.execute("ALTER TABLE r3born_uploads ADD COLUMN scheduled_at TEXT")
+            db.execute("UPDATE r3born_uploads SET state='scheduled', scheduled_at=?",
+                       ("2035-11-22T19:00:00+00:00",))
+        with patch("r3born_campaign.verify_channel") as verify:
+            with self.assertRaisesRegex(ValueError, "not due"):
+                upload_reviewed(self.root,"2026-11-19",1,digest,
+                    {"SHADOW_YOUTUBE_ACCESS_TOKEN":"mock",
+                     "SHADOW_YOUTUBE_CHANNEL_ID":"UC" + "x"*22},
+                    confirmed=True,audience="not-made-for-kids")
+            verify.assert_not_called()
+
+    def test_due_private_upload_is_claimed_once_without_network(self):
+        from unittest.mock import Mock
+        self.register(0)
+        digest = hashlib.sha256(self.files[0].read_bytes()).hexdigest()
+        channel = "UC" + "x"*22
+        with campaign_db(self.root) as db:
+            db.execute("ALTER TABLE r3born_uploads ADD COLUMN scheduled_at TEXT")
+            db.execute("UPDATE r3born_uploads SET state='scheduled', scheduled_at=?",
+                       ("2020-01-01T00:00:00+00:00",))
+        http = Mock()
+        http.post.return_value.status_code = 200
+        http.post.return_value.headers = {
+            "Location":"https://www.googleapis.com/upload/youtube/v3/videos?upload_id=test"
+        }
+        finished = Mock()
+        finished.json.return_value = {
+            "id":"GK1aJgt3Xtw","status":{"privacyStatus":"private"},
+            "snippet":{"channelId":channel}
+        }
+        with patch("r3born_campaign.verify_channel"), \\
+             patch("r3born_campaign.transfer", return_value=finished):
+            result = upload_reviewed(self.root,"2026-11-19",1,digest,
+                {"SHADOW_YOUTUBE_ACCESS_TOKEN":"mock",
+                 "SHADOW_YOUTUBE_CHANNEL_ID":channel},
+                confirmed=True,audience="not-made-for-kids",http=http)
+        self.assertEqual(result,"GK1aJgt3Xtw")
+        with campaign_db(self.root) as db:
+            self.assertEqual(db.execute("SELECT state FROM r3born_uploads").fetchone()[0],"private")
+        with self.assertRaisesRegex(ValueError,"not reviewed or due"):
+            upload_reviewed(self.root,"2026-11-19",1,digest,
+                {"SHADOW_YOUTUBE_ACCESS_TOKEN":"mock",
+                 "SHADOW_YOUTUBE_CHANNEL_ID":channel},
+                confirmed=True,audience="not-made-for-kids",http=http)
+
+
+
 if __name__ == "__main__":
     unittest.main()
