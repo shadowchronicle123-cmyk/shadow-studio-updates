@@ -65,7 +65,8 @@ jobs:
             'windows_voice_test.py',
             'production_worker_test.py',
             'private_upload_test.py',
-            'streamer_preview_test.py'
+            'streamer_preview_test.py',
+            'test_r3born_campaign.py'
           )
           foreach ($test in $tests) {
             Write-Host "Running $test"
@@ -125,6 +126,7 @@ jobs:
           python production_worker_test.py --real
           python private_upload_test.py
           python streamer_preview_test.py
+          python test_r3born_campaign.py
 
   candidate:
     if: github.head_ref == 'qa/cloud-windows-matrix' || github.ref == 'refs/heads/qa/cloud-windows-matrix'
