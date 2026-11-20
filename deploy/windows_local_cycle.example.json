@@ -1,0 +1,8 @@
+{
+  "enabled": false,
+  "state_dir": "C:\\ShadowStudio\\private-state",
+  "ideas_file": "C:\\ShadowStudio\\original-ideas.json",
+  "media_dir": "C:\\ShadowStudio\\licensed-footage",
+  "rights_manifest": "C:\\ShadowStudio\\approved-media.json",
+  "timezone": "America/New_York"
+}
