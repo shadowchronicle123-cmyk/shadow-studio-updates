@@ -5,7 +5,7 @@ HTTPS campaign asset with a known SHA-256; registration is not upload approval.
 """
 import argparse
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -156,8 +156,17 @@ def upload_reviewed(root, day, slot, expected_sha256, env, *,
             raise ValueError("Production is stopped")
     with campaign_db(root) as db:
         row = db.execute("SELECT * FROM r3born_uploads WHERE day=? AND slot=?", (day,slot)).fetchone()
-        if row is None or row["state"] != "reviewed":
-            raise ValueError("Slot is not reviewed; check YouTube Studio before retrying")
+        if row is None or row["state"] not in ("reviewed", "scheduled"):
+            raise ValueError("Slot is not reviewed or due; check YouTube Studio before retrying")
+        if row["state"] == "scheduled":
+            if "scheduled_at" not in row.keys() or not row["scheduled_at"]:
+                raise ValueError("Scheduled slot has no valid due time")
+            try:
+                due = datetime.fromisoformat(row["scheduled_at"])
+            except ValueError:
+                raise ValueError("Scheduled slot has an invalid due time") from None
+            if due.tzinfo is None or due.utcoffset() is None or due > datetime.now(timezone.utc):
+                raise ValueError("Scheduled private upload is not due")
         path = Path(row["path"])
         if (not path.is_file() or sha256(path) != row["sha256"] or
             row["sha256"] != expected_sha256.lower()):
@@ -171,10 +180,18 @@ def upload_reviewed(root, day, slot, expected_sha256, env, *,
     with campaign_db(root) as db:
         db.commit()
         db.execute("BEGIN IMMEDIATE")
-        updated = db.execute("""UPDATE r3born_uploads SET state='submitting'
-            WHERE day=? AND slot=? AND state='reviewed'""", (day,slot))
+        # Preserve the historical manually reviewed upload path, but require an
+        # unchanged, due schedule for newly scheduled private handoffs.
+        if row["state"] == "scheduled":
+            updated = db.execute("""UPDATE r3born_uploads SET state='submitting'
+                WHERE day=? AND slot=? AND state='scheduled' AND scheduled_at=?
+                AND sha256=?""", (day,slot,row["scheduled_at"],row["sha256"]))
+        else:
+            updated = db.execute("""UPDATE r3born_uploads SET state='submitting'
+                WHERE day=? AND slot=? AND state='reviewed' AND sha256=?""",
+                (day,slot,row["sha256"]))
         if updated.rowcount != 1:
-            raise ValueError("Slot already claimed")
+            raise ValueError("Slot already claimed or schedule changed")
     auth = {"Authorization": "Bearer " + token}
     media_started = False
     phase = "session_initialization"
