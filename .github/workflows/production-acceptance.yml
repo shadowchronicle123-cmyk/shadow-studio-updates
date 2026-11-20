@@ -61,6 +61,8 @@ jobs:
           python cloud_handoff_test.py
           python update_manager_test.py
           python migration_acceptance_test.py
+          python test_r3born_campaign.py
+          python campaign_review_test.py
       - name: Test real offline Windows voice
         if: runner.os == 'Windows'
         run: python windows_voice_test.py

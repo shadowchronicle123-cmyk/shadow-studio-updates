@@ -66,6 +66,8 @@ jobs:
             'production_worker_test.py',
             'private_upload_test.py',
             'streamer_preview_test.py',
+            'test_r3born_campaign.py',
+            'campaign_review_test.py',
             'test_r3born_campaign.py'
           )
           foreach ($test in $tests) {
@@ -126,6 +128,8 @@ jobs:
           python production_worker_test.py --real
           python private_upload_test.py
           python streamer_preview_test.py
+          python test_r3born_campaign.py
+          python campaign_review_test.py
           python test_r3born_campaign.py
 
   candidate:
