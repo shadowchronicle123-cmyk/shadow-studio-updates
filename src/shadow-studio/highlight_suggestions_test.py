@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import unittest
 
-from highlight_suggestions import generate, suggest
+from highlight_suggestions import generate, suggest, render_preview
 from streamer_clips import queue_items
 
 
@@ -74,6 +74,22 @@ class HighlightTests(unittest.TestCase):
                 inter=max(0,min(a["end_seconds"],b["end_seconds"])-max(a["start_seconds"],b["start_seconds"]))
                 union=(a["end_seconds"]-a["start_seconds"])+(b["end_seconds"]-b["start_seconds"])-inter
                 self.assertLessEqual(inter/union,0.35+1e-8)
+
+
+    def test_real_review_only_vertical_preview_preserves_audio(self):
+        first=generate(self.db,self.clip_id)["suggestions"][0]
+        result=render_preview(self.db,first["id"],self.root/"previews")
+        self.assertTrue(Path(result["preview"]).is_file())
+        self.assertEqual(result["uploads"],0)
+        self.assertEqual(result["state"],"review_required")
+        from quality_check import analyze
+        report=analyze(Path(result["preview"]))
+        self.assertTrue(report["passed"],report["blockers"])
+        self.assertEqual((report["width"],report["height"]),(1080,1920))
+        self.assertTrue(report["audio_present"])
+        with self.assertRaisesRegex(ValueError,"already exists"):
+            render_preview(self.db,first["id"],self.root/"previews")
+
 
 
 if __name__=="__main__":
