@@ -8,6 +8,8 @@ on:
       - 'src/shadow-studio/batch_planner_test.py'
       - 'src/shadow-studio/batch_ledger.py'
       - 'src/shadow-studio/batch_ledger_test.py'
+      - 'src/shadow-studio/quota_reconciliation.py'
+      - 'src/shadow-studio/quota_reconciliation_test.py'
       - '.github/workflows/publication-policy-qa.yml'
   push:
     branches:
@@ -37,3 +39,5 @@ jobs:
         run: python src/shadow-studio/batch_planner_test.py
       - name: Validate offline SQLite 20/day reservation ledger
         run: python src/shadow-studio/batch_ledger_test.py
+      - name: Validate offline quota reconciliation and uncertain outcomes
+        run: python src/shadow-studio/quota_reconciliation_test.py
