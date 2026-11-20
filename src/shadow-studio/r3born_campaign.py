@@ -96,6 +96,7 @@ def register(root, day, path, title, permission_reference, expected_sha256,
     if not all(term in description.lower() for term in ("#r3born", "@hardscope")):
         raise ValueError("Campaign description must include #r3born and @hardscope")
     with campaign_db(root) as db:
+        db.commit()
         db.execute("BEGIN IMMEDIATE")
         if db.execute("SELECT 1 FROM r3born_uploads WHERE sha256=?", (expected_sha256.lower(),)).fetchone():
             raise ValueError("These bytes have already been registered")
@@ -135,6 +136,7 @@ def upload_reviewed(root, day, slot, expected_sha256, env, *,
     channel_id = env.get("SHADOW_YOUTUBE_CHANNEL_ID")
     verify_channel(token, channel_id, http)
     with campaign_db(root) as db:
+        db.commit()
         db.execute("BEGIN IMMEDIATE")
         updated = db.execute("""UPDATE r3born_uploads SET state='submitting'
             WHERE day=? AND slot=? AND state='reviewed'""", (day,slot))
