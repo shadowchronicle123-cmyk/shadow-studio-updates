@@ -4,6 +4,7 @@ Never scrape a stream or bypass access controls. Download only a direct, authori
 HTTPS campaign asset with a known SHA-256; registration is not upload approval.
 """
 import argparse
+from contextlib import contextmanager
 from datetime import date
 import hashlib
 import json
@@ -87,6 +88,7 @@ def validate_media(path):
     return {"duration": duration, "width": width, "height": height}
 
 
+@contextmanager
 def campaign_db(root):
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -99,7 +101,11 @@ def campaign_db(root):
         permission_reference TEXT NOT NULL, state TEXT NOT NULL,
         video_id TEXT, UNIQUE(day,slot))""")
     db.commit()
-    return db
+    try:
+        with db:
+            yield db
+    finally:
+        db.close()
 
 
 def register(root, day, path, title, permission_reference, expected_sha256,
