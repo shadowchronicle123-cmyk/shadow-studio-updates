@@ -171,9 +171,13 @@ def upload_reviewed(root, day, slot, expected_sha256, env, *,
         if (not path.is_file() or sha256(path) != row["sha256"] or
             row["sha256"] != expected_sha256.lower()):
             raise ValueError("Reviewed media checksum mismatch")
+        # Verify the exact byte buffer handed to the uploader, not just a prior
+        # filesystem read. A source change between reads must fail closed.
         contents = path.read_bytes()
         if not contents or len(contents) > MAX_BYTES:
             raise ValueError("Invalid MP4 size")
+        if hashlib.sha256(contents).hexdigest() != row["sha256"]:
+            raise ValueError("Reviewed media checksum mismatch")
     token = env.get("SHADOW_YOUTUBE_ACCESS_TOKEN") or refresh_access_token(env, http)
     channel_id = env.get("SHADOW_YOUTUBE_CHANNEL_ID")
     verify_channel(token, channel_id, http)
