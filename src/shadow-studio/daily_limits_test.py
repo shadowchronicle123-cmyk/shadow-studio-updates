@@ -30,7 +30,8 @@ def run():
         assert len(snapshot(path)["reservations"]) == 2
         assert snapshot(path)["daily_limits"] == [(DAY, 2, 3200)]
         assert configure_day(path, DAY, capacity=1, quota_ceiling=1600) == (True, "configured")
-        assert claim(path, 7) == (False, "daily_capacity")
+        register_rights(path, f"{9:064x}", "license-9", authorized=True, reviewer_reference="qa-reviewer")
+        assert claim(path, 9) == (False, "daily_capacity")
         assert configure_day(path, DAY, capacity=2, quota_ceiling=1600) == (False, "cannot_raise_limits")
         set_stop(path, True)
         assert claim(path, 6) == (False, "emergency_stop")
