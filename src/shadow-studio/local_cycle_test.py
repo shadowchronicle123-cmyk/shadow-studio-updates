@@ -118,7 +118,9 @@ class LocalCycleTests(unittest.TestCase):
         self.assertEqual(second["status"],"completed")
         third=cycle(self.info,now=NOW,processor=fake_processor)
         self.assertEqual(third["status"],"idle")
-        self.assertEqual(calls,["story_day","highlight_scan"])
+        # Preflight queues approved highlights before the daily story; FIFO claims
+        # therefore process the highlight first, then the story on the next tick.
+        self.assertEqual(calls,["highlight_scan","story_day"])
         self.assertEqual(len(queue_status(self.info["state_dir"])),2)
 
     def test_unapproved_clip_ledger_entry_is_not_enqueued(self):
