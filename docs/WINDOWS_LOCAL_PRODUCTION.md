@@ -88,3 +88,10 @@ Every Windows cycle checks the approved source inventory and enqueues each match
 Queue failures remain `review_required`, not endlessly retried. Changes to source hashes or permission status prevent new scans. The existing clip ledger does not yet store expiry itself; the separate approved-media manifest is required as the additional expiry check.
 
 The Windows task is never installed by these repository changes; `-Install` is still an owner action.
+
+
+## Fail-closed preflight monitoring
+
+If the task finds unlisted media, missing/mismatched hashes, expired rights, a missing clip ledger, an unavailable disk-space check or insufficient disk space, the cycle does **not** run a render. It writes a sanitized `health-latest.json` issue and adds one deduplicated event to `alerts.jsonl`. Repeated checks update an SQLite occurrence counter rather than repeatedly appending identical alerts. Once the condition clears, the alert is marked resolved.
+
+These are **local alerts only** and are not push notifications, text messages or emails. Windows Task Scheduler does not automatically display their contents. Review the local health and alert files from the signed-in PC, or integrate an authorized notification transport later.
