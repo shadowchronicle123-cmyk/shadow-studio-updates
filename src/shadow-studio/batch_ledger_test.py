@@ -39,7 +39,7 @@ def run():
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "ledger.sqlite3"
         for n in range(30):
-            register_rights(path, f"{n:064x}", f"review-{n}", authorized=True, reviewer_reference="qa-reviewer"
+            register_rights(path, f"{n:064x}", f"review-{n}", authorized=True, reviewer_reference="qa-reviewer")
         with ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(lambda n: claim(path, n), range(30)))
         assert sum(ok for ok, _ in results) == 20, results
@@ -48,7 +48,7 @@ def run():
         assert all(reason in ("reserved","daily_capacity") for _,reason in results)
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "ledger.sqlite3"
-        register_rights(path, f"{42:064x}", "review-42", authorized=True)
+        register_rights(path, f"{42:064x}", "review-42", authorized=True, reviewer_reference="qa-reviewer")
         with ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(lambda _: claim(path, 42), range(12)))
         assert sum(ok for ok, _ in results) == 1
