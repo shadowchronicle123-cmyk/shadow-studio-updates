@@ -16,7 +16,7 @@ def run():
         path = Path(tmp) / "state" / "ledger.sqlite3"
         assert claim(path, 1) == (False, "rights_unverified")
         for n in (1,2,3):
-            register_rights(path, f"{n:064x}", f"review-{n}", authorized=True)
+            register_rights(path, f"{n:064x}", f"review-{n}", authorized=True, reviewer_reference="qa-reviewer")
         assert claim(path, 1) == (True, "reserved")
         assert claim(path, 1) == (False, "duplicate")
         assert claim(path, 2, quota_units=32000) == (False, "quota_budget")
@@ -31,6 +31,8 @@ def run():
         assert snapshot(path)["stopped"]
         set_stop(path, False)
         assert claim(path, 3) == (True, "reserved")
+        assert claim(path, 3) == (False, "duplicate")
+        assert len(snapshot(path)["reservations"]) == 2
         assert snapshot(path)["public_enabled"] is False
         assert snapshot(path)["audit"][0] == ("rejected", "rights_unverified")
         assert ("emergency_stop", "") in snapshot(path)["audit"]
@@ -53,8 +55,14 @@ def run():
         assert len(snapshot(path)["reservations"]) == 1
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "ledger.sqlite3"
-        register_rights(path, f"{5:064x}", "review-5", authorized=False)
+        register_rights(path, f"{5:064x}", "review-5", authorized=False, reviewer_reference="qa-reviewer")
         assert claim(path, 5) == (False, "rights_unverified")
+        try:
+            register_rights(path, f"{7:064x}", "review-7", authorized=True)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Rights approval without reviewer provenance accepted")
         for bad_day in ("2026-02-30", "2026-11-20x", "bad"):
             assert reserve(path, day=bad_day, fingerprint=f"{6:064x}", kind="clip",
                            permission_verified=True, quality_passed=True,
