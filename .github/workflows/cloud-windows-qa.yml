@@ -69,6 +69,7 @@ jobs:
             'test_r3born_campaign.py',
             'campaign_review_test.py',
             'production_health_test.py',
+            'worker_queue_test.py',
             'test_r3born_campaign.py'
           )
           foreach ($test in $tests) {
@@ -132,6 +133,7 @@ jobs:
           python test_r3born_campaign.py
           python campaign_review_test.py
           python production_health_test.py
+          python worker_queue_test.py
           python test_r3born_campaign.py
 
   candidate:
