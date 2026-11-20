@@ -153,14 +153,74 @@ def generate(database, clip_id, *, max_results=MAX_SUGGESTIONS):
             "uploads":0}
 
 
+
+def render_preview(database, suggestion_id, output_dir, *, anchor="center"):
+    """Render a single review-only 9:16 candidate with original source audio."""
+    import tempfile
+    from quality_check import analyze
+    from studio_tools import clip_media
+
+    if anchor not in ("left","center","right"):
+        raise ValueError("Choose left, center or right framing")
+    with closing(sqlite3.connect(database,timeout=10)) as db:
+        db.row_factory=sqlite3.Row
+        suggestion=db.execute("SELECT * FROM clip_suggestions WHERE id=?",
+                              (int(suggestion_id),)).fetchone()
+    if suggestion is None or suggestion["state"] not in ("review_required","approved"):
+        raise ValueError("Suggestion is unavailable or rejected")
+    clip,source,start,end=_licensed_clip(database,suggestion["clip_id"])
+    selected_start,selected_end=suggestion["start_seconds"],suggestion["end_seconds"]
+    if (suggestion["source_sha256"] != clip["sha256"] or
+        selected_start < start or selected_end > end or
+        not 15 <= selected_end-selected_start <= 60):
+        raise ValueError("Suggestion no longer matches the licensed review range")
+    output_dir=Path(output_dir)
+    output_dir.mkdir(parents=True,exist_ok=True)
+    destination=output_dir/f'candidate-{suggestion["clip_id"]}-{suggestion_id}.mp4'
+    if destination.exists():
+        raise ValueError("Preview already exists; refusing to overwrite reviewed bytes")
+    with tempfile.TemporaryDirectory(prefix="highlight-source-") as source_dir:
+        snapshot=Path(source_dir)/("source"+source.suffix.lower())
+        h=hashlib.sha256()
+        with source.open("rb") as stream, snapshot.open("xb") as out:
+            for chunk in iter(lambda:stream.read(1024*1024),b""):
+                h.update(chunk)
+                out.write(chunk)
+        if h.hexdigest()!=clip["sha256"]:
+            raise ValueError("Source changed while preparing the preview")
+        with tempfile.TemporaryDirectory(prefix="highlight-stage-",dir=output_dir) as stage:
+            rendered=clip_media(snapshot,selected_start,selected_end,
+                                output_dir=Path(stage),width=1080,height=1920,
+                                horizontal_anchor=anchor,normalize=True)
+            report=analyze(rendered)
+            if (not report["passed"] or
+                (report["width"],report["height"])!=(1080,1920) or
+                abs(report["duration_seconds"]-(selected_end-selected_start))>0.3 or
+                abs(report["fps"]-30)>0.2):
+                raise ValueError("Clip preview failed local audio/video quality checks")
+            rendered.replace(destination)
+    with destination.open("rb") as stream:
+        digest=hashlib.file_digest(stream,"sha256").hexdigest()
+    return {"preview":str(destination),"sha256":digest,"suggestion_id":int(suggestion_id),
+            "state":"review_required","uploads":0}
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--database",required=True,type=Path)
-    p.add_argument("--clip-id",required=True,type=int)
+    action=p.add_mutually_exclusive_group(required=True)
+    action.add_argument("--clip-id",type=int)
+    action.add_argument("--suggestion-id",type=int)
     p.add_argument("--max-results",type=int,default=3)
     p.add_argument("--output",type=Path)
+    p.add_argument("--output-dir",type=Path)
     args=p.parse_args()
-    result=generate(args.database,args.clip_id,max_results=args.max_results)
+    if args.suggestion_id is not None:
+        if args.output_dir is None:
+            p.error("--suggestion-id requires --output-dir")
+        result=render_preview(args.database,args.suggestion_id,args.output_dir)
+    else:
+        result=generate(args.database,args.clip_id,max_results=args.max_results)
     payload=json.dumps(result,indent=2)
     if args.output:
         args.output.parent.mkdir(parents=True,exist_ok=True)
