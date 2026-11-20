@@ -15,7 +15,13 @@ def font(size,bold=False):
         if Path(f).exists():return ImageFont.truetype(f,size)
     return ImageFont.load_default()
 def run(args):
-    p=subprocess.run([str(a) for a in args],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    command = [str(a) for a in args]
+    if command[0] == 'ffmpeg':
+        command.insert(1, '-nostdin')
+    try:
+        p = subprocess.run(command, capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f'{Path(command[0]).name} exceeded its 10-minute processing limit') from exc
     if p.returncode: raise RuntimeError(p.stderr[-1800:])
 
 def tts(text,path):
@@ -269,7 +275,7 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
     if second_voice is not None and voice_factory is None:
         from voice_engine import valid_voice
         if not valid_voice(second_voice): raise ValueError('Second character voice is unavailable')
-    with tempfile.TemporaryDirectory(prefix='shadow_') as temp:
+    with tempfile.TemporaryDirectory(prefix='shadow_',dir=output_dir) as temp:
         tmp=Path(temp);concat=[]; wavs=[]; durations=[]; narration=[]; images=[]
         if trim:
             if progress:progress(5,'Preparing trimmed gameplay')
@@ -320,9 +326,7 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
             concat.append((img,(frames-count)/30))
         captions_path = output_dir / 'captions.srt'
         if captions:
-            save_scene_subtitles(story, durations, captions_path, narration)
-        else:
-            captions_path.unlink(missing_ok=True)
+            save_scene_subtitles(story, durations, tmp/'captions.srt', narration)
         listfile=tmp/'scenes.txt'
         def escaped(p):return p.as_posix().replace("'", "'\\''")
         lines=[]
@@ -379,8 +383,13 @@ def generate(story,output_dir,style='messages',background=None,progress=None,voi
                          '-map','[v]','-map','1:a'])
         else:
             args.extend(['-map','0:v','-map','1:a','-vf',f'scale={out_width}:{out_height}:flags=lanczos,setsar=1'])
-        args+=['-r','30','-c:v','libx264','-preset','veryfast','-crf','25','-pix_fmt','yuv420p','-c:a','aac','-b:a','96k','-t',f'{sum(durations):.3f}','-movflags','+faststart',output]
+        args+=['-r','30','-c:v','libx264','-preset','veryfast','-crf','25','-pix_fmt','yuv420p','-c:a','aac','-b:a','96k','-t',f'{sum(durations):.3f}','-movflags','+faststart',tmp/'short.mp4']
         if progress:progress(85,'Finalizing voiceover and MP4')
         run(args)
+        (tmp/'short.mp4').replace(output)
+        if captions:
+            (tmp/'captions.srt').replace(captions_path)
+        else:
+            captions_path.unlink(missing_ok=True)
         if progress:progress(100,'Video ready for review')
         return {'path':str(output),'duration':round(sum(durations),1),'resolution':resolution,'fps':30,'captions_path':str(captions_path) if captions else None}
