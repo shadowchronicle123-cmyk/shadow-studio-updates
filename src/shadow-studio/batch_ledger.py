@@ -41,6 +41,10 @@ def transaction(path):
             for statement in SCHEMA.split(";"):
                 if statement.strip():
                     db.execute(statement)
+            db.execute("""CREATE TRIGGER IF NOT EXISTS audit_no_update
+                         BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT, 'audit_append_only'); END""")
+            db.execute("""CREATE TRIGGER IF NOT EXISTS audit_no_delete
+                         BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT, 'audit_append_only'); END""")
             yield db
             db.execute("COMMIT")
         except BaseException:
