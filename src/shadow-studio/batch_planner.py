@@ -17,7 +17,7 @@ class Candidate:
 
 
 def fingerprint(item):
-    canonical = f"{item.source_url.strip()}|{item.start_ms}|{item.end_ms}|{item.source_sha256.lower()}"
+    canonical = f"{item.source_url}|{item.start_ms}|{item.end_ms}|{item.source_sha256}"
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
