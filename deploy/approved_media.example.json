@@ -1,0 +1,9 @@
+[
+  {
+    "file": "owner-approved-source.mp4",
+    "sha256": "REPLACE_WITH_ACTUAL_64_CHARACTER_SHA256",
+    "permission_reference": "REPLACE_WITH_WRITTEN_LICENSE_OR_OWNER_APPROVAL_REFERENCE",
+    "license_scope": "commercial-edit-and-repost",
+    "expires_at": "2035-12-31"
+  }
+]
