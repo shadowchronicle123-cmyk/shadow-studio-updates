@@ -100,6 +100,27 @@ def run():
                 else:
                     raise AssertionError("Audit mutation was accepted")
         assert snapshot(path)["audit"] == [("emergency_stop", "")]
+    # Simulate a process failure before COMMIT: no partial stop, claim or audit survives.
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "rollback.sqlite3"
+        set_stop(path, False)
+        baseline = snapshot(path)
+        try:
+            with transaction(path) as db:
+                db.execute("UPDATE control SET stopped=1 WHERE id=1")
+                db.execute("""INSERT INTO reservations(day,fingerprint,kind,quota_units,created_at)
+                              VALUES(?,?,?,?,?)""",
+                           (DAY, f"{91:064x}", "clip", 1600, "2026-11-20T00:00:00+00:00"))
+                db.execute("""INSERT INTO audit(occurred_at,event,day,fingerprint,detail)
+                              VALUES(?,?,?,?,?)""",
+                           ("2026-11-20T00:00:00+00:00", "reserved", DAY, f"{91:064x}", "clip"))
+                raise RuntimeError("simulated interrupted transaction")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("Expected simulated transaction failure")
+        assert snapshot(path) == baseline, "Uncommitted reservation or audit leaked"
+        assert snapshot(path)["public_enabled"] is False
     print("PASS offline atomic 20/day ledger, quota, rights, stop, duplicates, concurrency and audit")
 
 if __name__ == "__main__":
