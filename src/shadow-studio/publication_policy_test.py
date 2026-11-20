@@ -34,6 +34,17 @@ def main():
     ]:
         assert eligible(enabled, **(good | override)) == (False, reason), reason
     assert eligible(enabled, **(good | {"published_today": 19}))[0]
+    for bad_policy in [
+        replace(enabled, daily_target=0),
+        replace(enabled, daily_target=21),
+        replace(enabled, daily_production_capacity=0),
+        replace(enabled, daily_target=20, daily_production_capacity=10),
+        replace(enabled, minimum_interval_minutes=-1),
+    ]:
+        assert eligible(bad_policy, **good) == (False, "invalid_policy_or_count")
+    for bad_count in (-1, 1.5, True):
+        assert eligible(enabled, **(good | {"published_today": bad_count})) == (
+            False, "invalid_policy_or_count")
     print("PASS disabled-by-default 20/day clips-first publication policy and safety gates")
 
 
