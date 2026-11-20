@@ -1,0 +1,53 @@
+name: Shadow Studio public publication policy offline QA
+on:
+  pull_request:
+    paths:
+      - 'src/shadow-studio/publication_policy.py'
+      - 'src/shadow-studio/publication_policy_test.py'
+      - 'src/shadow-studio/batch_planner.py'
+      - 'src/shadow-studio/batch_planner_test.py'
+      - 'src/shadow-studio/batch_ledger.py'
+      - 'src/shadow-studio/batch_ledger_test.py'
+      - 'src/shadow-studio/quota_reconciliation.py'
+      - 'src/shadow-studio/quota_reconciliation_test.py'
+      - 'src/shadow-studio/daily_limits.py'
+      - 'src/shadow-studio/daily_limits_test.py'
+      - '.github/workflows/publication-policy-qa.yml'
+  push:
+    branches:
+      - 'qa/independent-integration-review-20261119'
+    paths:
+      - 'src/shadow-studio/publication_policy.py'
+      - 'src/shadow-studio/publication_policy_test.py'
+      - 'src/shadow-studio/batch_ledger.py'
+      - 'src/shadow-studio/batch_ledger_test.py'
+      - 'src/shadow-studio/quota_reconciliation.py'
+      - 'src/shadow-studio/quota_reconciliation_test.py'
+      - 'src/shadow-studio/daily_limits.py'
+      - 'src/shadow-studio/daily_limits_test.py'
+      - '.github/workflows/publication-policy-qa.yml'
+permissions:
+  contents: read
+jobs:
+  offline-policy:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+        python-version: ['3.12', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Validate offline publication policy (no network or uploads)
+        run: python src/shadow-studio/publication_policy_test.py
+      - name: Validate offline clips-first batch planner
+        run: python src/shadow-studio/batch_planner_test.py
+      - name: Validate offline SQLite 20/day reservation ledger
+        run: python src/shadow-studio/batch_ledger_test.py
+      - name: Validate offline quota reconciliation and uncertain outcomes
+        run: python src/shadow-studio/quota_reconciliation_test.py
+      - name: Validate persistent daily limits and reviewer provenance
+        run: python src/shadow-studio/daily_limits_test.py

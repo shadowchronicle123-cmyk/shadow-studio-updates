@@ -121,6 +121,17 @@ def main(real=False):
         assert private_upload.upload_daily(controls,record['day'],env,transport)=='example1234'
         assert transport.put.call_args.kwargs['data']==(controls/record['artifact']).read_bytes()
         assert private_upload.upload_daily(controls,record['day'],env,transport)=='private'
+        # Direct single-video handoff must reject a duplicate, even when the
+        # daily status query safely reports that the first upload is private.
+        try:
+            private_upload.upload(controls, record['day'],
+                                  hashlib.sha256((controls/record['artifact']).read_bytes()).hexdigest(),
+                                  'test-access', channel_id=channel, confirmed=True,
+                                  for_kids=False, http=transport)
+        except ValueError as exc:
+            assert 'existing upload record' in str(exc)
+        else:
+            raise AssertionError('Direct duplicate upload was not blocked')
         assert transport.put.call_count==1
         with patch.dict('os.environ',{'SHADOW_PRODUCTION_STATE':str(controls)}):
             downloaded = TestClient(app.app).get('/api/production/render/2026-11-19')

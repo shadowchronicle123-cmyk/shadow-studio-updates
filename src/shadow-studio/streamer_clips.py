@@ -5,7 +5,6 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
-from contextlib import closing
 import tempfile
 from urllib.parse import urlsplit
 
@@ -84,10 +83,6 @@ def queue_items(data, media_root, database):
 
 
 def make_preview(database, clip_id, output_dir, anchor="center"):
-    from advanced_tools import media_duration
-    from quality_check import analyze
-    from studio_tools import clip_media
-
     if anchor not in ("left", "center", "right"):
         raise ValueError("Choose left, center or right framing")
     with closing(sqlite3.connect(database)) as db:
@@ -98,6 +93,9 @@ def make_preview(database, clip_id, output_dir, anchor="center"):
     if clip["license_scope"] not in ("edit-and-repost", "commercial-edit-and-repost"):
         raise ValueError("Preview requires permission to edit and repost the source")
     source = Path(clip["file"])
+    # The dashboard may request its first preview before the output folder exists.
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="streamer-preview-") as temp_dir:
         scratch = Path(temp_dir)
         snapshot = scratch / ("source" + source.suffix)
@@ -112,6 +110,10 @@ def make_preview(database, clip_id, output_dir, anchor="center"):
                 out.write(block)
         if digest.hexdigest() != clip["sha256"]:
             raise ValueError("Source file changed after rights intake")
+        # Only load optional rendering dependencies after validating the source.
+        from advanced_tools import media_duration
+        from quality_check import analyze
+        from studio_tools import clip_media
         span = clip["end_seconds"] - clip["start_seconds"]
         if not 3 <= span <= 60 or clip["end_seconds"] > media_duration(snapshot) + .05:
             raise ValueError("Choose a 3–60-second range within the source video")
