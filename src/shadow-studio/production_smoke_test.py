@@ -28,6 +28,43 @@ def synthetic_voice(text, path, voice, rate):
         audio.writeframes(samples.tobytes())
 
 
+def verify_failed_export(destination):
+    from unittest.mock import patch
+    from subprocess import TimeoutExpired
+
+    original = renderer.run
+    def fail_final(args):
+        if Path(args[-1]).name == 'short.mp4':
+            Path(args[-1]).write_bytes(b'incomplete')
+            raise RuntimeError('simulated final mux timeout')
+        return original(args)
+
+    previous = {(destination/name): (destination/name).read_bytes()
+                for name in ('short.mp4', 'captions.srt')}
+    story = {'title': 'Failed export fixture',
+             'lines': [{'speaker': 'Narrator', 'text': 'This revised line must not replace the old captions.'}]}
+    with patch.object(renderer, 'run', side_effect=fail_final):
+        try:
+            renderer.generate(story, destination, captions=False)
+        except RuntimeError as exc:
+            assert str(exc) == 'simulated final mux timeout'
+        else:
+            raise AssertionError('Expected the final mux to fail')
+    assert all(path.read_bytes() == content for path, content in previous.items())
+    assert not list(destination.glob('shadow_*'))
+
+    with patch.object(renderer.subprocess, 'run', side_effect=TimeoutExpired('ffmpeg', 600)) as run:
+        try:
+            renderer.run(['ffmpeg','-version'])
+        except RuntimeError as exc:
+            assert '10-minute' in str(exc)
+        else:
+            raise AssertionError('Expected a bounded render command')
+        assert run.call_args.kwargs['timeout'] == 600
+        assert '-nostdin' in run.call_args.args[0]
+    print('PASS failed final mux preserves previous video and captions, cleans staging, and times out')
+
+
 def main():
     print('Shadow Studio — offline export smoke test')
     assert shutil.which('ffmpeg'), 'FFmpeg not installed or missing from PATH'
@@ -61,6 +98,7 @@ def main():
             print('PASS real vertical 720 x 1280 30 FPS MP4 export')
             print('PASS generated non-silent audio verified by FFprobe')
             print('PASS two scene-aligned SRT cues')
+            verify_failed_export(destination)
             # Verify that the new guard refuses a silent scene.
             silent_path = Path(workspace) / 'silent.wav'
             with wave.open(str(silent_path), 'wb') as audio:
