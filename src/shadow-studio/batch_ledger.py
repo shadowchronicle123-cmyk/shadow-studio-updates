@@ -5,7 +5,7 @@ Quota units are caller-provided estimates, not verified YouTube quota measuremen
 """
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 SCHEMA = """
@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS reservations (
  kind TEXT NOT NULL, quota_units INTEGER NOT NULL CHECK(quota_units>0),
  state TEXT NOT NULL DEFAULT 'reserved', created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_reservations_day ON reservations(day);
+CREATE TABLE IF NOT EXISTS rights_evidence (
+ fingerprint TEXT PRIMARY KEY, evidence_reference TEXT NOT NULL,
+ authorized INTEGER NOT NULL CHECK(authorized IN (0,1)));
 CREATE TABLE IF NOT EXISTS audit (
  id INTEGER PRIMARY KEY, occurred_at TEXT NOT NULL, event TEXT NOT NULL,
  day TEXT, fingerprint TEXT, detail TEXT NOT NULL);
@@ -28,8 +31,10 @@ def transaction(path):
     db = sqlite3.connect(path, timeout=10, isolation_level=None)
     try:
         db.execute("PRAGMA busy_timeout=10000")
-        db.executescript(SCHEMA)
         db.execute("BEGIN IMMEDIATE")
+        for statement in SCHEMA.split(";"):
+            if statement.strip():
+                db.execute(statement)
         try:
             yield db
             db.execute("COMMIT")
@@ -53,6 +58,23 @@ def set_stop(path, stopped):
         audit(db, "emergency_stop" if stopped else "manual_resume_required")
 
 
+def register_rights(path, fingerprint, evidence_reference, *, authorized=False):
+    """Record a trusted reviewer decision; arbitrary caller claims are not sufficient."""
+    if (not isinstance(fingerprint, str) or len(fingerprint) != 64
+            or any(c not in "0123456789abcdef" for c in fingerprint)
+            or not isinstance(evidence_reference, str) or not evidence_reference.strip()
+            or type(authorized) is not bool):
+        raise ValueError("Invalid rights evidence")
+    with transaction(path) as db:
+        db.execute("""INSERT INTO rights_evidence(fingerprint,evidence_reference,authorized)
+                      VALUES(?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET
+                      evidence_reference=excluded.evidence_reference,
+                      authorized=excluded.authorized""",
+                   (fingerprint, evidence_reference.strip(), int(authorized)))
+        audit(db, "rights_review", fingerprint=fingerprint,
+              detail="approved" if authorized else "denied")
+
+
 def reserve(path, *, day, fingerprint, kind, permission_verified=False,
             quality_passed=False, daily_capacity=20, quota_limit=None,
             quota_units=1600):
@@ -61,7 +83,11 @@ def reserve(path, *, day, fingerprint, kind, permission_verified=False,
     No network, uploads, rendering, or public publishing are performed.
     The rights boolean must originate from a trusted rights-ledger verification.
     """
-    if (not isinstance(day,str) or len(day)!=10
+    try:
+        valid_day = date.fromisoformat(day).isoformat() == day if type(day) is str else False
+    except ValueError:
+        valid_day = False
+    if (not valid_day
             or not isinstance(fingerprint,str) or len(fingerprint)!=64
             or any(c not in "0123456789abcdef" for c in fingerprint)
             or kind not in ("clip","story")
@@ -73,7 +99,9 @@ def reserve(path, *, day, fingerprint, kind, permission_verified=False,
         if db.execute("SELECT stopped FROM control WHERE id=1").fetchone()[0]:
             audit(db, "rejected", day, fingerprint, "emergency_stop")
             return False, "emergency_stop"
-        if not permission_verified:
+        rights_row = db.execute("SELECT authorized FROM rights_evidence WHERE fingerprint=?",
+                                (fingerprint,)).fetchone() if kind == "clip" else None
+        if not permission_verified or (kind == "clip" and rights_row != (1,)):
             audit(db, "rejected", day, fingerprint, "rights_unverified")
             return False, "rights_unverified"
         if not quality_passed:
