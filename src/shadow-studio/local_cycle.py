@@ -158,7 +158,7 @@ def cycle(info, *, now=None, processor=None):
     job_id,created=queue.enqueue(root,"story_day","story:"+today.isoformat(),
             {"day":today.isoformat(),"ideas_file":info["ideas_file"],
              "media_dir":info["media_dir"],"timezone":info["timezone"]},now=moment)
-    result=queue.run_once(root,processor=processor)
+    result=queue.run_once(root,processor=processor,now=moment)
     report=inspect(root,now=moment)
     alerts=record_alerts(root,report,now=moment)
     _write_report(root,report,alerts)
