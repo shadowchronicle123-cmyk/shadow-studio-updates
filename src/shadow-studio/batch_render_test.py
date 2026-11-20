@@ -13,7 +13,8 @@ c=TestClient(app.app)
 def complete(response):
     assert response.status_code == 200,response.text
     batch_id=response.json()['id']
-    for _ in range(120):
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
         batch=c.get('/api/job/'+batch_id).json()
         if batch['state']!='running':
             return batch
