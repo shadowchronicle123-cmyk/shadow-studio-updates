@@ -64,6 +64,27 @@ class CampaignTests(unittest.TestCase):
                                 confirmed=True,audience="not-made-for-kids")
             token.assert_not_called()
 
+    def test_ambiguous_transfer_reports_phase_and_blocks_retry(self):
+        from unittest.mock import Mock
+        self.register(0)
+        digest = hashlib.sha256(self.files[0].read_bytes()).hexdigest()
+        http = Mock()
+        http.post.return_value.status_code = 200
+        http.post.return_value.headers = {
+            "Location": "https://www.googleapis.com/upload/youtube/v3/videos?upload_id=test"
+        }
+        with patch("r3born_campaign.verify_channel"), \
+             patch("r3born_campaign.transfer", side_effect=RuntimeError("private-token-do-not-print")):
+            with self.assertRaisesRegex(RuntimeError, "media_transfer \\(RuntimeError\\)") as raised:
+                upload_reviewed(self.root, "2026-11-19", 1, digest,
+                                {"SHADOW_YOUTUBE_ACCESS_TOKEN": "fake",
+                                 "SHADOW_YOUTUBE_CHANNEL_ID": "UC" + "x"*22},
+                                confirmed=True, audience="not-made-for-kids", http=http)
+        self.assertNotIn("private-token-do-not-print", str(raised.exception))
+        with campaign_db(self.root) as db:
+            self.assertEqual(db.execute("SELECT state FROM r3born_uploads WHERE slot=1").fetchone()[0],
+                             "needs_reconciliation")
+
     def test_confirmation_required(self):
         self.register(0)
         digest = hashlib.sha256(self.files[0].read_bytes()).hexdigest()
