@@ -20,7 +20,7 @@ from captions import read_captions, as_webvtt
 from voice_engine import VOICES, available_voices, valid_voice, create_voice
 import studio_tools
 from studio_tools import save_project, list_projects, get_project, clip_media, CLIPS
-from streamer_clips import make_preview as render_streamer_preview, queue_items as queue_streamer_clips
+from streamer_clips import decide_review, make_preview as render_streamer_preview, recent_reviews, queue_items as queue_streamer_clips
 from gameplay_library import GameplayLibrary, gameplay_duration, gameplay_window
 from split_screen import split_screen
 from video_ranking import rank_videos
@@ -1092,6 +1092,28 @@ def streamer_preview(req: StreamerPreviewRequest):
     return {'clip_id': record, 'video_url': '/api/clip/' + rendered.stem, 'state': 'review_required'}
 
 
+class StreamerReviewRequest(BaseModel):
+    decision: Literal['approved', 'rejected', 'review_required']
+
+
+@app.get('/api/streamer-clips/review')
+def streamer_review_list():
+    return recent_reviews(studio_tools.PROJECTS/'streamer-clips.sqlite3')
+
+
+@app.post('/api/streamer-clips/review/{video_id}')
+def streamer_review_decision(video_id: str, req: StreamerReviewRequest):
+    if not re.fullmatch('[a-f0-9]{12}',video_id):
+        raise HTTPException(404,'Preview not found')
+    try:
+        decide_review(studio_tools.PROJECTS/'streamer-clips.sqlite3', CLIPS, video_id, req.decision)
+    except FileNotFoundError:
+        raise HTTPException(404,'Preview not found')
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
+    return {'state': req.decision}
+
+
 # Split Screen: private, local, owner-uploaded footage only. Does not publish.
 class SplitRequest(BaseModel):
     top_name: str
@@ -1411,6 +1433,11 @@ HTML=r'''<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="
 <button class="subtle" onclick="productionStop(false)" id="productionResume" disabled>Resume production</button>
 <button class="subtle" onclick="refreshProduction()">Refresh</button></div>
 <div id="productionJobs"></div>
+<h3>Streamer clip review</h3>
+<p class="muted">Review decisions are saved locally.</p>
+<div id="streamerReviews"></div>
+<p id="streamerReviewStatus" role="status"></p>
+<div id="streamerReviewPlayer"></div>
 </section>
 <script>
 
@@ -1441,6 +1468,10 @@ document.getElementById('streamerClipForm').addEventListener('submit',async even
       start_seconds:start,end_seconds:end,anchor:el('streamerAnchor').value
    })});
    renderToolOutput('streamerPreviewOutput','Preview ready for review.',preview.video_url);
+   const review=document.createElement('button');
+   review.textContent='Open clip review queue';
+   review.onclick=()=>{switchView('production');refreshProduction();};
+   el('streamerPreviewOutput').append(review);
  } catch(error) {
    renderToolOutput('streamerPreviewOutput','Clip error: '+error.message);
  } finally {
@@ -1507,6 +1538,7 @@ async function reviewExport(){
  }catch(error){setStatus(error.message)}
 }
 async function refreshProduction(){
+ refreshStreamerReviews();
  try{
   const result=await api('/api/production/status');
   el('productionStop').disabled=!result.configured || result.stopped;
@@ -1529,6 +1561,46 @@ async function refreshProduction(){
    jobs.append(row);
   }
  }catch(error){el('productionSummary').textContent=error.message}
+}
+async function refreshStreamerReviews(){
+ const root=el('streamerReviews');
+ const status=el('streamerReviewStatus');
+ try{
+  const items=await api('/api/streamer-clips/review');
+  root.replaceChildren();
+  if(!items.length)root.textContent='No rendered clips to review.';
+  for(const item of items){
+   const row=document.createElement('div');
+   const url='/api/clip/'+encodeURIComponent(item.video_id);
+   const summary=document.createElement('p');
+   summary.textContent=item.creator+' · '+(item.end_seconds-item.start_seconds).toFixed(1)+' s · '+item.state.replaceAll('_',' ');
+   row.append(summary);
+   const preview=document.createElement('button');
+   preview.textContent='Preview clip';
+   preview.onclick=()=>renderToolOutput('streamerReviewPlayer',item.creator,url);
+   row.append(preview);
+   for(const [decision,label] of [['approved','Approve'],['rejected','Reject'],['review_required','Reset review']]){
+    const button=document.createElement('button');
+    button.textContent=label;
+    button.disabled=item.state===decision;
+    button.onclick=async()=>{
+     for(const action of row.querySelectorAll('button')) action.disabled=true;
+     try{
+      await api('/api/streamer-clips/review/'+encodeURIComponent(item.video_id),{
+       method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({decision})
+      });
+      status.textContent='Review saved.';
+      await refreshStreamerReviews();
+     }catch(error){
+      await refreshStreamerReviews();
+      status.textContent=error.message;
+     }
+    };
+    row.append(button);
+   }
+   root.append(row);
+  }
+ }catch(error){status.textContent=error.message}
 }
 async function productionStop(stopped){
  try{

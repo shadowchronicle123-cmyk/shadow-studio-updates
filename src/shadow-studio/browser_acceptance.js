@@ -105,6 +105,15 @@ const path=require('node:path');
    fs.writeFileSync(path.join(process.env.SHADOW_ARTIFACT_DIR,'streamer-preview.mp4'),await response.body());
    await page.locator('#streamerPreviewOutput').screenshot({path:path.join(process.env.SHADOW_ARTIFACT_DIR,'streamer-preview.png')});
   }
+  await page.getByRole('button',{name:'Daily Production',exact:true}).click();
+  const clipReviews=page.locator('#streamerReviews');
+  await clipReviews.getByRole('button',{name:'Preview clip'}).click();
+  await page.waitForFunction(()=>document.querySelector('#streamerReviewPlayer video')?.videoWidth===1080);
+  await clipReviews.getByRole('button',{name:'Approve',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('#streamerReviews').textContent.includes('approved'));
+  await page.reload();
+  await page.getByRole('button',{name:'Daily Production',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('#streamerReviews').textContent.includes('approved'));
   assert.deepEqual(issues,[]);
   const mobile=await browser.newPage({viewport:{width:390,height:844}});
   await mobile.goto(url);

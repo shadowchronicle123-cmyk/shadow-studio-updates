@@ -1,11 +1,10 @@
 """Rights-aware, offline streamer clip intake. No downloading or publishing."""
 import argparse
-from contextlib import closing
+from contextlib import closing, contextmanager
 import hashlib
 import json
 from pathlib import Path
 import sqlite3
-from contextlib import closing
 import tempfile
 from urllib.parse import urlsplit
 
@@ -126,7 +125,54 @@ def make_preview(database, clip_id, output_dir, anchor="center"):
                 raise ValueError("The preview failed audio, video or timing checks")
             destination = Path(output_dir) / rendered.name
             rendered.replace(destination)
+            try:
+                with rendered_reviews(database) as db:
+                    with destination.open("rb") as stream:
+                        checksum = hashlib.file_digest(stream, "sha256").hexdigest()
+                    db.execute("INSERT INTO rendered_reviews(video_id, clip_id, sha256) VALUES (?,?,?)",
+                               (destination.stem, clip_id, checksum))
+            except (OSError, sqlite3.Error):
+                destination.unlink(missing_ok=True)
+                raise
     return destination
+
+
+
+
+@contextmanager
+def rendered_reviews(database):
+    with closing(sqlite3.connect(database)) as db, db:
+        db.row_factory = sqlite3.Row
+        db.execute("""CREATE TABLE IF NOT EXISTS rendered_reviews (
+            video_id TEXT PRIMARY KEY, clip_id INTEGER NOT NULL, sha256 TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'review_required'
+        )""")
+        yield db
+
+
+def recent_reviews(database):
+    if not database.is_file():
+        return []
+    with rendered_reviews(database) as db:
+        return [dict(row) for row in db.execute("""
+            SELECT r.video_id,r.state,c.creator,c.start_seconds,c.end_seconds
+            FROM rendered_reviews r JOIN clips c ON c.id=r.clip_id
+            ORDER BY r.rowid DESC LIMIT 50
+        """)]
+
+
+def decide_review(database, output_dir, video_id, decision):
+    if not database.is_file():
+        raise FileNotFoundError()
+    with rendered_reviews(database) as db:
+        entry = db.execute("SELECT sha256 FROM rendered_reviews WHERE video_id=?", (video_id,)).fetchone()
+        if entry is None:
+            raise FileNotFoundError()
+        if decision == "approved":
+            with (output_dir / (video_id + ".mp4")).open("rb") as stream:
+                if hashlib.file_digest(stream, "sha256").hexdigest() != entry["sha256"]:
+                    raise ValueError("Preview changed after quality checks. Render a new preview.")
+        db.execute("UPDATE rendered_reviews SET state=? WHERE video_id=?", (decision, video_id))
 
 
 def main():

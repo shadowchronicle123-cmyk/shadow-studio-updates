@@ -29,3 +29,17 @@ No credentials, owner footage, public posts, paid resources, or channel changes 
 - Daily output now includes a title, description, tags and content format in `metadata.json`. Technical acceptance rejects invalid caption intervals and sustained near-black frames before marking the video ready.
 - PR #6 has green intake safety checks. PR #7 has green pure caption planning checks. PR #8 carries the overlapping caption planner plus FFmpeg and transcription adapters, so integrate the caption stack once after reviewing its latest commit and confirming genuine model inference. The independent branches were kept intact.
 - A persistent Linux host, owner-controlled Google Desktop OAuth consent and authorized production footage are still required for a live private upload rehearsal. The worker uses the existing ShadowChronicles channel only.
+
+## Unified review checkpoint
+
+Daily Production shows the daily story worker and the latest 50 verified
+streamer clip previews. The clip list and review decisions survive app
+restarts. Approval verifies the exact render bytes against the checksum
+recorded after quality checks. Existing preview MP4s stay downloadable by
+their original link. Earlier renders without a recorded checksum need to be
+rendered again to appear in the review queue.
+
+Clip decisions are local review metadata. The existing uploader still accepts
+its own verified story exports only. Scheduled clip production, live
+transcription, clip analytics, and hosted dashboard access remain open. This
+change uses neither a paid provider nor YouTube credentials.
