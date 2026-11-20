@@ -79,6 +79,15 @@ def review(root, day, slot, action, *, at=None, note=""):
             scheduled = _utc(at)
             if datetime.fromisoformat(scheduled) <= datetime.now(timezone.utc):
                 raise ValueError("Schedule must be in the future")
+            # Day is normalized to UTC: prevent overbooking a later upload day
+            # even when source clips were registered on separate dates.
+            occupied = db.execute("""SELECT count(*) FROM r3born_uploads
+                WHERE substr(scheduled_at,1,10)=? AND id<>?
+                AND state IN ('scheduled','submitting','retryable',
+                              'needs_reconciliation','private')""",
+                (scheduled[:10],row["id"])).fetchone()[0]
+            if occupied >= 3:
+                raise ValueError("Three private handoffs are already scheduled for that UTC day")
             state = "scheduled"
         else:
             if row["state"] != "scheduled":
