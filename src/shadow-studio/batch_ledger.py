@@ -21,6 +21,10 @@ CREATE TABLE IF NOT EXISTS quota_reconciliation (
  extra_units INTEGER NOT NULL CHECK(extra_units >= 0),
  actual_units INTEGER,
  outcome TEXT NOT NULL CHECK(outcome IN ('confirmed','uncertain')));
+CREATE TABLE IF NOT EXISTS daily_limits (
+ day TEXT PRIMARY KEY,
+ capacity INTEGER NOT NULL CHECK(capacity BETWEEN 1 AND 20),
+ quota_ceiling INTEGER NOT NULL CHECK(quota_ceiling >= 0));
 CREATE TABLE IF NOT EXISTS rights_evidence (
  fingerprint TEXT PRIMARY KEY, evidence_reference TEXT NOT NULL,
  authorized INTEGER NOT NULL CHECK(authorized IN (0,1)));
@@ -41,6 +45,9 @@ def transaction(path):
             for statement in SCHEMA.split(";"):
                 if statement.strip():
                     db.execute(statement)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(rights_evidence)")}
+            if "reviewer_reference" not in columns:
+                db.execute("ALTER TABLE rights_evidence ADD COLUMN reviewer_reference TEXT")
             db.execute("""CREATE TRIGGER IF NOT EXISTS audit_no_update
                          BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT, 'audit_append_only'); END""")
             db.execute("""CREATE TRIGGER IF NOT EXISTS audit_no_delete
@@ -76,11 +83,12 @@ def register_rights(path, fingerprint, evidence_reference, *, authorized=False, 
             or type(authorized) is not bool):
         raise ValueError("Invalid rights evidence")
     with transaction(path) as db:
-        db.execute("""INSERT INTO rights_evidence(fingerprint,evidence_reference,authorized)
-                      VALUES(?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET
+        db.execute("""INSERT INTO rights_evidence(fingerprint,evidence_reference,authorized,reviewer_reference)
+                      VALUES(?,?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET
                       evidence_reference=excluded.evidence_reference,
-                      authorized=excluded.authorized""",
-                   (fingerprint, evidence_reference.strip(), int(authorized)))
+                      authorized=excluded.authorized,
+                      reviewer_reference=excluded.reviewer_reference""",
+                   (fingerprint, evidence_reference.strip(), int(authorized), reviewer_reference.strip()))
         audit(db, "rights_review", fingerprint=fingerprint,
               detail=("approved:" if authorized else "denied:") + reviewer_reference.strip())
 
@@ -109,9 +117,9 @@ def reserve(path, *, day, fingerprint, kind, permission_verified=False,
         if db.execute("SELECT stopped FROM control WHERE id=1").fetchone()[0]:
             audit(db, "rejected", day, fingerprint, "emergency_stop")
             return False, "emergency_stop"
-        rights_row = db.execute("SELECT authorized FROM rights_evidence WHERE fingerprint=?",
+        rights_row = db.execute("SELECT authorized,reviewer_reference FROM rights_evidence WHERE fingerprint=?",
                                 (fingerprint,)).fetchone() if kind == "clip" else None
-        if not permission_verified or (kind == "clip" and rights_row != (1,)):
+        if not permission_verified or (kind == "clip" and (rights_row is None or rights_row[0] != 1 or not rights_row[1])):
             audit(db, "rejected", day, fingerprint, "rights_unverified")
             return False, "rights_unverified"
         if not quality_passed:
@@ -120,6 +128,12 @@ def reserve(path, *, day, fingerprint, kind, permission_verified=False,
         if db.execute("SELECT 1 FROM reservations WHERE fingerprint=?", (fingerprint,)).fetchone():
             audit(db, "rejected", day, fingerprint, "duplicate")
             return False, "duplicate"
+        stored_limit = db.execute(
+            "SELECT capacity,quota_ceiling FROM daily_limits WHERE day=?", (day,)
+        ).fetchone()
+        if stored_limit is not None:
+            daily_capacity = min(daily_capacity, stored_limit[0])
+            quota_limit = min(quota_limit, stored_limit[1])
         count, used = db.execute(
             """SELECT COUNT(*),COALESCE(SUM(r.quota_units + COALESCE(q.extra_units,0)),0)
                FROM reservations r LEFT JOIN quota_reconciliation q
@@ -142,6 +156,8 @@ def snapshot(path):
     with transaction(path) as db:
         return {
             "stopped": bool(db.execute("SELECT stopped FROM control WHERE id=1").fetchone()[0]),
+            "daily_limits": db.execute("SELECT day,capacity,quota_ceiling FROM daily_limits ORDER BY day").fetchall(),
+            "rights_evidence": db.execute("SELECT fingerprint,evidence_reference,authorized,reviewer_reference FROM rights_evidence ORDER BY fingerprint").fetchall(),
             "reservations": db.execute("SELECT day,fingerprint,kind,quota_units FROM reservations ORDER BY id").fetchall(),
             "audit": db.execute("SELECT event,detail FROM audit ORDER BY id").fetchall(),
             "quota_reconciliation": db.execute("SELECT fingerprint,extra_units,actual_units,outcome FROM quota_reconciliation ORDER BY fingerprint").fetchall(),
