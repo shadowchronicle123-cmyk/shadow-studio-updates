@@ -10,6 +10,8 @@ on:
       - 'src/shadow-studio/batch_ledger_test.py'
       - 'src/shadow-studio/quota_reconciliation.py'
       - 'src/shadow-studio/quota_reconciliation_test.py'
+      - 'src/shadow-studio/daily_limits.py'
+      - 'src/shadow-studio/daily_limits_test.py'
       - '.github/workflows/publication-policy-qa.yml'
   push:
     branches:
@@ -17,6 +19,12 @@ on:
     paths:
       - 'src/shadow-studio/publication_policy.py'
       - 'src/shadow-studio/publication_policy_test.py'
+      - 'src/shadow-studio/batch_ledger.py'
+      - 'src/shadow-studio/batch_ledger_test.py'
+      - 'src/shadow-studio/quota_reconciliation.py'
+      - 'src/shadow-studio/quota_reconciliation_test.py'
+      - 'src/shadow-studio/daily_limits.py'
+      - 'src/shadow-studio/daily_limits_test.py'
       - '.github/workflows/publication-policy-qa.yml'
 permissions:
   contents: read
@@ -41,3 +49,5 @@ jobs:
         run: python src/shadow-studio/batch_ledger_test.py
       - name: Validate offline quota reconciliation and uncertain outcomes
         run: python src/shadow-studio/quota_reconciliation_test.py
+      - name: Validate persistent daily limits and reviewer provenance
+        run: python src/shadow-studio/daily_limits_test.py
