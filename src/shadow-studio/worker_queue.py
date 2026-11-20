@@ -153,8 +153,8 @@ def fail(root, job_id, lease, *, transient=False, code="worker_error", now=None)
         return {"state":state, "retry_after_seconds":delay, "attempts":row["attempts"]}
 
 
-def quarantine_stale(root, *, now=None, stale_seconds=120):
-    """Explicit fail-closed recovery: never replay an uncertain render/upload."""
+def quarantine_stale(root, *, now=None, stale_seconds=120, retry_health=False):
+    """Recover stale claims without replaying renders or uploads."""
     if stale_seconds < HEARTBEAT_SECONDS * 2:
         raise ValueError("Staleness threshold must exceed two heartbeats")
     moment = now if now is not None else datetime.now(timezone.utc)
@@ -162,11 +162,15 @@ def quarantine_stale(root, *, now=None, stale_seconds=120):
     with database(root) as db:
         db.commit()
         db.execute("BEGIN IMMEDIATE")
-        rows = db.execute("""SELECT id FROM local_queue WHERE state='claimed'
+        rows = db.execute("""SELECT id,kind,attempts,max_attempts FROM local_queue WHERE state='claimed'
             AND (heartbeat_at IS NULL OR heartbeat_at < ?) ORDER BY id""",(boundary,)).fetchall()
         for row in rows:
-            db.execute("""UPDATE local_queue SET state='review_required',reason='stale_lease',
-                lease=NULL WHERE id=? AND state='claimed'""",(row["id"],))
+            retry = retry_health and row["kind"] == "health_check" and row["attempts"] < row["max_attempts"]
+            state = "retry_wait" if retry else "review_required"
+            delay = 30 * 2 ** (row["attempts"] - 1) if retry else 0
+            db.execute("""UPDATE local_queue SET state=?,reason='stale_lease',
+                not_before=?,lease=NULL,heartbeat_at=NULL WHERE id=? AND state='claimed'""",
+                (state,utc(moment + timedelta(seconds=delay)),row["id"]))
         return [r["id"] for r in rows]
 
 

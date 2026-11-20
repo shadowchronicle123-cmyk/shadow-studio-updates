@@ -216,6 +216,7 @@ def cycle(info, *, now=None, processor=None):
         added_highlights=enqueue_licensed_highlights(info,now=moment)
     except (OSError,ValueError,KeyError,TypeError,sqlite3.Error):
         return _preflight_blocked(root,"rights_or_ledger_preflight_blocked",moment)
+    recovered=queue.quarantine_stale(root,now=moment,stale_seconds=180,retry_health=True)
     job_id,created=queue.enqueue(root,"story_day","story:"+today.isoformat(),
             {"day":today.isoformat(),"ideas_file":info["ideas_file"],
              "media_dir":info["media_dir"],"timezone":info["timezone"]},now=moment)
@@ -224,7 +225,7 @@ def cycle(info, *, now=None, processor=None):
     alerts=record_alerts(root,report,now=moment)
     _write_report(root,report,alerts)
     return {"status":result["status"],"job_id":job_id,"queued":created,
-            "licensed_highlight_jobs":added_highlights,
+            "licensed_highlight_jobs":added_highlights,"recovered_queue_claims":len(recovered),
             "approved_sources":licensed,"health":report["status"],"new_alerts":len(alerts)}
 
 
