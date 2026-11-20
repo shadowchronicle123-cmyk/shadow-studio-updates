@@ -4,5 +4,7 @@
   "ideas_file": "C:\\ShadowStudio\\original-ideas.json",
   "media_dir": "C:\\ShadowStudio\\licensed-footage",
   "rights_manifest": "C:\\ShadowStudio\\approved-media.json",
-  "timezone": "America/New_York"
+  "timezone": "America/New_York",
+  "auto_highlights": false,
+  "clip_database": "C:\\ShadowStudio\\clips.sqlite3"
 }

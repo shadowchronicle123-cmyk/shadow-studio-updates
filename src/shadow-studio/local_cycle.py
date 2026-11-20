@@ -4,12 +4,14 @@ Never downloads footage or uploads to YouTube. No paid APIs. Safe for repeating
 Windows Task Scheduler invocation after the owner explicitly installs it.
 """
 import argparse
+from contextlib import closing
 from datetime import date, datetime, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import shutil
 import sys
 import uuid
@@ -40,6 +42,11 @@ def config(path):
     if type(info.get("enabled")) is not bool:
         raise ValueError("Set enabled to true or false explicitly")
     ZoneInfo(info["timezone"])  # Fail closed if Windows timezone database is unavailable.
+    if "auto_highlights" in info and type(info["auto_highlights"]) is not bool:
+        raise ValueError("auto_highlights must be an explicit boolean")
+    if info.get("auto_highlights") and (
+        not isinstance(info.get("clip_database"),str) or not info["clip_database"]):
+        raise ValueError("clip_database is required for automatic licensed highlights")
     return info
 
 
@@ -97,6 +104,40 @@ def validate_rights(info, *, today=None):
     if not isinstance(ideas,list) or not ideas or not all(isinstance(s,str) and 3 <= len(s.strip()) <= 350 for s in ideas):
         raise ValueError("Ideas must be an owner-approved JSON list of original premises")
     return len(expected)
+
+
+def enqueue_licensed_highlights(info, *, now=None):
+    """Only scan registered clips matching the current approved source inventory."""
+    if not info.get("auto_highlights",False):
+        return 0
+    clip_db=Path(info["clip_database"]).resolve(strict=True)
+    if not clip_db.is_file():
+        raise ValueError("Registered clip ledger is missing")
+    media_root=Path(info["media_dir"]).resolve(strict=True)
+    approved=json.loads(Path(info["rights_manifest"]).read_text(encoding="utf-8"))
+    expected={r["file"]:r["sha256"].lower() for r in approved}
+    with closing(sqlite3.connect(clip_db.as_uri()+"?mode=ro",uri=True,timeout=10)) as db:
+        db.row_factory=sqlite3.Row
+        registered=db.execute("""SELECT id,file,sha256,license_scope,state
+                                 FROM clips ORDER BY id LIMIT 101""").fetchall()
+    if len(registered)>100:
+        raise ValueError("Clip intake exceeds the explicit local scan limit")
+    created=0
+    for row in registered:
+        if row["license_scope"] not in SCOPES or row["state"] in ("rejected","blocked","revoked"):
+            continue
+        source=Path(row["file"])
+        if (not source.is_file() or source.is_symlink() or
+            source.resolve().parent != media_root or
+            expected.get(source.name)!=row["sha256"]):
+            continue
+        sha=row["sha256"]
+        key="highlight:"+hashlib.sha256((str(clip_db)+"|"+str(row["id"])+"|"+sha).encode("utf-8")).hexdigest()
+        _,added=queue.enqueue(info["state_dir"],"highlight_scan",key,
+            {"clip_database":str(clip_db),"clip_id":row["id"],
+             "source_sha256":sha},now=now,max_attempts=1)
+        created+=int(added)
+    return created
 
 
 def record_alerts(root, report, *, now=None):
@@ -158,11 +199,13 @@ def cycle(info, *, now=None, processor=None):
     job_id,created=queue.enqueue(root,"story_day","story:"+today.isoformat(),
             {"day":today.isoformat(),"ideas_file":info["ideas_file"],
              "media_dir":info["media_dir"],"timezone":info["timezone"]},now=moment)
+    added_highlights=enqueue_licensed_highlights(info,now=moment)
     result=queue.run_once(root,processor=processor,now=moment)
     report=inspect(root,now=moment)
     alerts=record_alerts(root,report,now=moment)
     _write_report(root,report,alerts)
     return {"status":result["status"],"job_id":job_id,"queued":created,
+            "licensed_highlight_jobs":added_highlights,
             "approved_sources":licensed,"health":report["status"],"new_alerts":len(alerts)}
 
 

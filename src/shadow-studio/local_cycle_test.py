@@ -6,7 +6,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from local_cycle import config, validate_rights, cycle, record_alerts
+from local_cycle import config, validate_rights, cycle, record_alerts, enqueue_licensed_highlights
+from streamer_clips import queue_items
 from worker_queue import queue_status
 
 NOW=datetime(2035,1,1,tzinfo=timezone.utc)
@@ -92,6 +93,43 @@ class LocalCycleTests(unittest.TestCase):
         path.write_text(json.dumps(self.info),encoding="utf-8")
         with self.assertRaisesRegex(ValueError,"credentials"):
             config(path)
+
+
+    def test_opt_in_licensed_highlights_process_without_uploads(self):
+        self.info["auto_highlights"]=True
+        clip_db=self.root/"clips.sqlite3"
+        self.info["clip_database"]=str(clip_db)
+        item={"creator":"Authorized creator","source_url":"https://www.twitch.tv/example",
+              "permission_reference":"Owner license reference",
+              "license_scope":"commercial-edit-and-repost",
+              "file":"approved.mp4","start_seconds":0,"end_seconds":36}
+        queue_items([item],self.media,clip_db)
+        calls=[]
+        def fake_processor(root,job):
+            calls.append(job["kind"])
+            return "ready" if job["kind"]=="story_day" else "checked"
+        first=cycle(self.info,now=NOW,processor=fake_processor)
+        self.assertEqual(first["licensed_highlight_jobs"],1)
+        self.assertEqual(first["status"],"completed")
+        second=cycle(self.info,now=NOW,processor=fake_processor)
+        self.assertEqual(second["licensed_highlight_jobs"],0)
+        self.assertEqual(second["status"],"completed")
+        third=cycle(self.info,now=NOW,processor=fake_processor)
+        self.assertEqual(third["status"],"idle")
+        self.assertEqual(calls,["story_day","highlight_scan"])
+        self.assertEqual(len(queue_status(self.info["state_dir"])),2)
+
+    def test_unapproved_clip_ledger_entry_is_not_enqueued(self):
+        clip_db=self.root/"clips.sqlite3"
+        self.info["clip_database"]=str(clip_db)
+        self.info["auto_highlights"]=True
+        item={"creator":"Authorized creator","source_url":"https://www.twitch.tv/example",
+              "permission_reference":"Owner license reference",
+              "license_scope":"repost",
+              "file":"approved.mp4","start_seconds":0,"end_seconds":36}
+        queue_items([item],self.media,clip_db)
+        self.assertEqual(enqueue_licensed_highlights(self.info,now=NOW),0)
+
 
 
 if __name__=="__main__":

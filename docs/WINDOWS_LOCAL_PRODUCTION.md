@@ -64,3 +64,27 @@ python src\shadow-studio\worker_queue.py --state 'C:\ShadowStudio\private-state'
 The third command is an explicit operator action to quarantine a stale claim; check the real worker process and output folder first. It does **not** delete or retry any job. Active and resolved alerts are recorded in the existing SQLite state, and new alerts are appended to `alerts.jsonl`. The current local alert inbox is **not** a phone push, email or SMS service. The latest health report is `health-latest.json`.
 
 **Validation scope:** GitHub Windows/Linux tests can exercise the Python queue, rights gate, alert deduplication and PowerShell script parser. They cannot prove the real Windows Scheduled Task registered or ran on your personal computer. No remote cloud host is provisioned by this work. No 8–12 hour unattended endurance test is claimed.
+
+
+## Optional unattended licensed streamer highlight suggestions
+
+After your local story render cycle is verified, you can opt in to processing additional **already licensed** streamer footage without adding any uploads.
+
+Register each approved local file and permitted time range in the existing `streamer_clips.py` ledger first. The clip file must also appear in `approved-media.json` with the same SHA-256, a documented edit-and-repost permission reference, and a current license expiration or confirmed perpetual permission.
+
+Add these fields to `worker-config.json`:
+
+```json
+{
+  "auto_highlights": true,
+  "clip_database": "C:\\ShadowStudio\\clips.sqlite3"
+}
+```
+
+The complete configuration must retain the existing `enabled`, `state_dir`, `ideas_file`, `media_dir`, `rights_manifest`, and `timezone` settings. The snippet above is an example of the additional fields, not a replacement configuration.
+
+Every Windows cycle checks the approved source inventory and enqueues each matching `clip_id` plus exact source SHA-256 **only once**. The persistent worker processes at most one queued task per 10-minute invocation. A successful scan writes 15–50-second audio-activity suggestions to the existing clip ledger for review; it does not publish, upload, change existing videos, or automatically approve the selections.
+
+Queue failures remain `review_required`, not endlessly retried. Changes to source hashes or permission status prevent new scans. The existing clip ledger does not yet store expiry itself; the separate approved-media manifest is required as the additional expiry check.
+
+The Windows task is never installed by these repository changes; `-Install` is still an owner action.

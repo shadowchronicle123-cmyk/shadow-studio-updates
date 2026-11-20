@@ -4,6 +4,7 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
+import hashlib
 import tempfile
 import unittest
 
@@ -97,6 +98,28 @@ class WorkerQueueTests(unittest.TestCase):
             q.enqueue(self.root,"health_check","check",{},max_attempts=500)
         with self.assertRaisesRegex(ValueError,"Story"):
             q.enqueue(self.root,"story_day","story:2035-01-01",{})
+
+
+    def test_highlight_scan_dedup_and_no_retry(self):
+        approved="a"*64
+        db=str(self.root/"clips.sqlite3")
+        key="highlight:"+hashlib.sha256((str(Path(db).resolve())+"|1|"+approved).encode("utf-8")).hexdigest()
+        job_id,created=q.enqueue(self.root,"highlight_scan",key,
+                 {"clip_database":db,"clip_id":1,"source_sha256":approved},now=T0)
+        self.assertTrue(created)
+        self.assertFalse(q.enqueue(self.root,"highlight_scan",key,
+                 {"clip_database":db,"clip_id":1,"source_sha256":approved},now=T0)[1])
+        job=q.claim(self.root,now=T0)
+        self.assertEqual(job["kind"],"highlight_scan")
+        self.assertEqual(q.fail(self.root,job_id,job["lease"],transient=True,
+                               now=T0)["state"],"review_required")
+        self.assertIsNone(q.claim(self.root,now=T0+timedelta(days=1)))
+
+    def test_highlight_payload_digest_and_key_are_enforced(self):
+        with self.assertRaisesRegex(ValueError,"SHA-256"):
+            q.enqueue(self.root,"highlight_scan","highlight:wrong",
+                {"clip_database":"x","clip_id":1,"source_sha256":"bad"},now=T0)
+
 
 
 if __name__=="__main__":
