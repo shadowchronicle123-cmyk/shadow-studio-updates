@@ -12,3 +12,6 @@ PyJWT[crypto]>=2.8,<3
 
 # Authorized YouTube/Twitch URL imports (optional, subject to source access)
 yt-dlp>=2025.1
+
+# IANA timezone database fallback required for Windows Python zoneinfo
+tzdata>=2024.1

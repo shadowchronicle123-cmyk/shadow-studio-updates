@@ -179,11 +179,11 @@ def _run_original(root, job):
                    timezone=item["timezone"],day=item["day"])
 
 
-def run_once(root, *, processor=None, heartbeat_interval=HEARTBEAT_SECONDS):
+def run_once(root, *, processor=None, heartbeat_interval=HEARTBEAT_SECONDS, now=None):
     """One supervised job. No automatic public/private YouTube upload."""
     if heartbeat_interval <= 0:
         raise ValueError("Heartbeat interval must be positive")
-    job = claim(root)
+    job = claim(root, now=now)
     if job is None:
         return {"status":"idle"}
     stop = threading.Event()

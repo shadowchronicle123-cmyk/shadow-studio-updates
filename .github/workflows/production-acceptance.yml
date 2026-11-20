@@ -65,6 +65,7 @@ jobs:
           python campaign_review_test.py
           python production_health_test.py
           python worker_queue_test.py
+          python local_cycle_test.py
       - name: Test real offline Windows voice
         if: runner.os == 'Windows'
         run: python windows_voice_test.py
