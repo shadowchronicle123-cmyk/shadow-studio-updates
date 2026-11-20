@@ -29,6 +29,14 @@ def eligible(policy, *, activated=False, stopped=False, published_today=0,
     """Fail closed; return (allowed, reason). No side effects or publishing."""
     if not policy.public_enabled or not activated:
         return False, "public_publishing_disabled"
+    if (type(policy.daily_target) is not int or type(policy.daily_production_capacity) is not int
+            or not 1 <= policy.daily_target <= 20
+            or not 1 <= policy.daily_production_capacity <= 20
+            or policy.daily_target > policy.daily_production_capacity
+            or type(policy.minimum_interval_minutes) is not int
+            or policy.minimum_interval_minutes < 0
+            or type(published_today) is not int or published_today < 0):
+        return False, "invalid_policy_or_count"
     if stopped:
         return False, "emergency_stop"
     if published_today >= policy.daily_target or published_today >= policy.daily_production_capacity:
