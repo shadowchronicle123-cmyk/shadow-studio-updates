@@ -105,11 +105,37 @@ def ready(root, now=None):
                 for row in rows]
 
 
+
+def dispatch_due(root, env, *, confirmed=False, audience=None, now=None, uploader=None):
+    """Opt-in scheduled PRIVATE handoff; invokes the existing verified uploader.
+
+    Never calls public publishing. The uploader holds the atomic SQLite claim
+    and reconciles ambiguous media transfers rather than retrying blindly.
+    """
+    if not confirmed or audience not in ("made-for-kids", "not-made-for-kids"):
+        raise ValueError("Explicit private dispatch confirmation and audience required")
+    from r3born_campaign import upload_reviewed
+    send = uploader or upload_reviewed
+    completed = []
+    for row in ready(root, now):
+        if not row["due"]:
+            continue
+        video_id = send(root, row["day"], row["slot"], row["sha256"], env,
+                        confirmed=True, audience=audience)
+        completed.append({"day": row["day"], "slot": row["slot"],
+                          "state": "private", "video_id": video_id})
+    return completed
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--state", required=True)
     sub = p.add_subparsers(dest="action", required=True)
     sub.add_parser("status")
+    dispatch = sub.add_parser("dispatch-due", help="Opt-in due-only PRIVATE handoff")
+    dispatch.add_argument("--credentials", required=True)
+    dispatch.add_argument("--confirm-private", action="store_true")
+    dispatch.add_argument("--audience", choices=("made-for-kids", "not-made-for-kids"), required=True)
     for action in ("approve", "schedule", "reject", "unschedule"):
         item = sub.add_parser(action)
         item.add_argument("--day", required=True)
@@ -123,6 +149,11 @@ def main():
         rows = ready(args.state)
         print(json.dumps([{k: r[k] for k in ("day","slot","state","title",
                     "scheduled_at","due","video_id")} for r in rows], indent=2))
+    elif args.action == "dispatch-due":
+        from private_upload import read_worker_settings
+        credentials = read_worker_settings(Path(args.credentials))
+        print(json.dumps(dispatch_due(args.state, credentials,
+              confirmed=args.confirm_private, audience=args.audience), indent=2))
     else:
         print(json.dumps(review(args.state, args.day, args.slot,
               args.action, at=getattr(args,"at",None),note=args.note), indent=2))
