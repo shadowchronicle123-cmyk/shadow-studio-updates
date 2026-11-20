@@ -39,7 +39,7 @@ def run():
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "ledger.sqlite3"
         for n in range(30):
-            register_rights(path, f"{n:064x}", f"review-{n}", authorized=True)
+            register_rights(path, f"{n:064x}", f"review-{n}", authorized=True, reviewer_reference="qa-reviewer"
         with ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(lambda n: claim(path, n), range(30)))
         assert sum(ok for ok, _ in results) == 20, results
