@@ -162,7 +162,7 @@ def quarantine_stale(root, *, now=None, stale_seconds=120, retry_health=False):
     with database(root) as db:
         db.commit()
         db.execute("BEGIN IMMEDIATE")
-        rows = db.execute("""SELECT id,kind,attempts,max_attempts FROM local_queue WHERE state='claimed'
+        rows = db.execute("""SELECT id,kind,attempts,max_attempts,lease FROM local_queue WHERE state='claimed'
             AND (heartbeat_at IS NULL OR heartbeat_at < ?) ORDER BY id""",(boundary,)).fetchall()
         for row in rows:
             retry = retry_health and row["kind"] == "health_check" and row["attempts"] < row["max_attempts"]
@@ -171,6 +171,12 @@ def quarantine_stale(root, *, now=None, stale_seconds=120, retry_health=False):
             db.execute("""UPDATE local_queue SET state=?,reason='stale_lease',
                 not_before=?,lease=NULL,heartbeat_at=NULL WHERE id=? AND state='claimed'""",
                 (state,utc(moment + timedelta(seconds=delay)),row["id"]))
+            if row["kind"] == "story_day" and row["lease"] and db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_claims'"
+            ).fetchone():
+                db.execute("""UPDATE jobs SET state='failed',message='Interrupted render requires review'
+                    WHERE state='running' AND day IN
+                    (SELECT day FROM service_claims WHERE invocation=?)""", ("queue:"+row["lease"],))
         return [r["id"] for r in rows]
 
 
@@ -200,7 +206,7 @@ def process_job(root, job):
     item = job["payload"]
     ideas = json.loads(Path(item["ideas_file"]).read_text(encoding="utf-8"))
     return run_day(root, ideas, Path(item["media_dir"]),
-                   timezone=item["timezone"],day=item["day"])
+                   timezone=item["timezone"],day=item["day"],invocation="queue:"+job["lease"])
 
 
 def run_once(root, *, processor=None, heartbeat_interval=HEARTBEAT_SECONDS, now=None):

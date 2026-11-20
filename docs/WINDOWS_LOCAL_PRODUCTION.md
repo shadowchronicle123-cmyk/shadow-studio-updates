@@ -105,3 +105,13 @@ These are **local alerts only** and are not push notifications, text messages or
 5. Review a local private handoff ZIP. Confirm it contains the approved video and expected checksum. A live private upload and task installation are separate acceptance steps that require owner approval.
 
 The production tick checks for expired leases after successful preflight. Only read-only health checks with a remaining persisted attempt budget can be retried, after an exponential delay. Rendering and highlight jobs go to review. The explicit quarantine command continues to quarantine every expired claim.
+
+### Interrupted-render evidence
+
+The automated test starts a separate production process, waits for a controlled
+partial MP4 write, kills the process, and runs the next cycle against its SQLite
+state. Recovery fails the production row tied to that exact expired lease,
+preserves the partial file for inspection, and keeps the same-day duplicate
+guard in force. The next day can reserve a new job. The test uses a controlled
+partial-write fixture; it does not stop a real Windows Scheduled Task or
+terminate FFmpeg itself.
