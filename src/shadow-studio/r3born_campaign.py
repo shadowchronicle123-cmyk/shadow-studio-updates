@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+import subprocess
 from urllib.parse import urlsplit
 
 import requests
@@ -63,6 +64,29 @@ def download_campaign(url, destination, expected_sha256, *, http=requests):
     return target
 
 
+
+def validate_media(path):
+    """Check the actual rendered Short before labeling it reviewed."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "format=duration:stream=codec_type,width,height", "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=30, check=True)
+        info = json.loads(result.stdout)
+        streams = info.get("streams", [])
+        video = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
+        audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
+        duration = float(info.get("format", {}).get("duration", 0))
+        if not video or not audio or not 7 <= duration <= 180:
+            raise ValueError("Clip needs video, original audio track, and 7-180 second duration")
+        width, height = int(video.get("width", 0)), int(video.get("height", 0))
+        if width < 360 or height < 640 or not 0.53 <= width / height <= 0.60:
+            raise ValueError("Clip must be vertical 9:16 with usable resolution")
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, TypeError, ZeroDivisionError, OverflowError) as exc:
+        raise ValueError("Unable to verify rendered MP4 with ffprobe") from exc
+    return {"duration": duration, "width": width, "height": height}
+
+
 def campaign_db(root):
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -93,6 +117,9 @@ def register(root, day, path, title, permission_reference, expected_sha256,
         raise ValueError("MP4 differs from approved bytes")
     if not title.strip() or not permission_reference.strip():
         raise ValueError("Title and documented campaign repost permission are required")
+    if "faze" in title.casefold() or "faze" in description.casefold():
+        raise ValueError("Campaign prohibits FaZe references in upload metadata")
+    validate_media(path)
     if not all(term in description.lower() for term in ("#r3born", "@hardscope")):
         raise ValueError("Campaign description must include #r3born and @hardscope")
     with campaign_db(root) as db:
