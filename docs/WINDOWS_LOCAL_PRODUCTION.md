@@ -115,3 +115,32 @@ preserves the partial file for inspection, and keeps the same-day duplicate
 guard in force. The next day can reserve a new job. The test uses a controlled
 partial-write fixture; it does not stop a real Windows Scheduled Task or
 terminate FFmpeg itself.
+
+## First PC acceptance without installing an update
+
+1. Download and extract the acceptance branch into a **new folder** beside the
+   existing installation. Use `src\shadow-studio` inside the extracted copy.
+   Keep the existing installation and its projects, media, state database and
+   credentials in place.
+2. In the test folder, use an existing Python 3.11+ setup with FFmpeg and FFprobe
+   on PATH. If this copy has no dependencies yet, run once in PowerShell:
+
+   ```powershell
+   py -3 -m venv .venv
+   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+   ```
+
+3. Double-click `test_windows.bat`. It prints the temporary sample folder and
+   leaves the window open. Open the MP4 and `acceptance-report.txt` from that
+   folder. Check narration, caption readability and pacing.
+4. For the separate app startup check, run `start_windows.bat` from the test
+   copy. Confirm the app opens at `http://127.0.0.1:8765`, then close its console.
+   Close the original app first if it is already using that port.
+
+The one-click launcher uses generated background footage and local narration.
+It does not run dependency installation, copy .env, invoke the updater or
+install a scheduled task. Keep the temporary output if you want the sample.
+For rollback from this acceptance test, close the test copy and reopen the
+original installation. Retain the extracted test copy and sample until review
+is complete. The existing updater's simulated upgrade and failed-install
+rollback are exercised separately by `migration_acceptance_test.py`.

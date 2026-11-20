@@ -79,6 +79,12 @@ jobs:
             python $test
             if ($LASTEXITCODE -ne 0) { throw "$test failed with exit code $LASTEXITCODE" }
           }
+      - name: Run Windows acceptance launcher
+        shell: cmd
+        run: |
+          python -m venv --system-site-packages .venv
+          if errorlevel 1 exit /b 1
+          call test_windows.bat /nopause
       - name: Parse Windows Task Scheduler installer without installing tasks
         run: |
           $tokens = $null
@@ -136,6 +142,7 @@ jobs:
           python update_manager_test.py
           python migration_acceptance_test.py
           python production_worker_test.py --real
+          python pc_acceptance.py
           python private_upload_test.py
           python streamer_preview_test.py
           python test_r3born_campaign.py
