@@ -81,6 +81,18 @@ class LocalCycleTests(unittest.TestCase):
         self.assertEqual(calls, ["health_check"])
         self.assertEqual(queue_status(root)[1]["attempts"], 2)
 
+    def test_stale_story_payload_never_reaches_renderer(self):
+        root = self.info["state_dir"]
+        day = NOW.date().isoformat()
+        old = {"day": day, "ideas_file": self.info["ideas_file"],
+               "media_dir": str(self.root/"old-footage"), "timezone": "UTC"}
+        enqueue(root, "story_day", "story:"+day, old, now=NOW)
+        calls = []
+        outcome = cycle(self.info, now=NOW, processor=lambda *args: calls.append(args))
+        self.assertEqual(outcome["status"], "review_required")
+        self.assertEqual(queue_status(root)[0]["reason"], "approval_changed")
+        self.assertFalse(calls)
+
     def test_unlisted_and_mutated_footage_fail_closed(self):
         (self.media/"unapproved.mp4").write_bytes(b"unknown")
         with self.assertRaisesRegex(ValueError,"unapproved"):

@@ -180,7 +180,7 @@ def queue_status(root):
             max_attempts,not_before,claimed_at,heartbeat_at,reason FROM local_queue ORDER BY id""")]
 
 
-def _run_original(root, job):
+def process_job(root, job):
     if job["kind"] == "health_check":
         from production_health import inspect
         result = inspect(root)
@@ -218,13 +218,14 @@ def run_once(root, *, processor=None, heartbeat_interval=HEARTBEAT_SECONDS, now=
     worker = threading.Thread(target=pulse,daemon=True)
     worker.start()
     try:
-        outcome = (processor or _run_original)(root, job)
+        outcome = (processor or process_job)(root, job)
         if outcome in ("ready","checked"):
             if not finish(root,job["id"],job["lease"]):
                 raise RuntimeError("Queue lease lost: do not replay job")
             return {"status":"completed", "id":job["id"]}
-        result = fail(root,job["id"],job["lease"],code="unexpected_result")
-        return {"status":result["state"],"id":job["id"]}
+        code = "approval_changed" if outcome == "approval_changed" else "unexpected_result"
+        result = fail(root,job["id"],job["lease"],code=code)
+        return {"status":result["state"] if result else "lease_lost","id":job["id"]}
     except (Exception,):
         # Never serialize stack traces, credentials or source file paths.
         result = fail(root,job["id"],job["lease"],

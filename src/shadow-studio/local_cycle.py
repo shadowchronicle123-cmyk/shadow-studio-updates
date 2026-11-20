@@ -106,10 +106,10 @@ def validate_rights(info, *, today=None):
     return len(expected)
 
 
-def enqueue_licensed_highlights(info, *, now=None):
+def licensed_highlights(info):
     """Only scan registered clips matching the current approved source inventory."""
     if not info.get("auto_highlights",False):
-        return 0
+        return {}
     clip_db=Path(info["clip_database"]).resolve(strict=True)
     if not clip_db.is_file():
         raise ValueError("Registered clip ledger is missing")
@@ -122,7 +122,7 @@ def enqueue_licensed_highlights(info, *, now=None):
                                  FROM clips ORDER BY id LIMIT 101""").fetchall()
     if len(registered)>100:
         raise ValueError("Clip intake exceeds the explicit local scan limit")
-    created=0
+    candidates = {}
     for row in registered:
         if row["license_scope"] not in SCOPES or row["state"] in ("rejected","blocked","revoked"):
             continue
@@ -133,10 +133,17 @@ def enqueue_licensed_highlights(info, *, now=None):
             continue
         sha=row["sha256"]
         key="highlight:"+hashlib.sha256((str(clip_db)+"|"+str(row["id"])+"|"+sha).encode("utf-8")).hexdigest()
-        _,added=queue.enqueue(info["state_dir"],"highlight_scan",key,
-            {"clip_database":str(clip_db),"clip_id":row["id"],
-             "source_sha256":sha},now=now,max_attempts=1)
-        created+=int(added)
+        candidates[key] = {"clip_database":str(clip_db),"clip_id":row["id"],"source_sha256":sha}
+    return candidates
+
+
+def enqueue_licensed_highlights(info, *, now=None, candidates=None):
+    if candidates is None:
+        candidates = licensed_highlights(info)
+    created = 0
+    for key, payload in candidates.items():
+        _, added = queue.enqueue(info["state_dir"],"highlight_scan",key,payload,now=now,max_attempts=1)
+        created += int(added)
     return created
 
 
@@ -213,14 +220,27 @@ def cycle(info, *, now=None, processor=None):
         today=moment.astimezone(ZoneInfo(info["timezone"])).date()
         licensed=validate_rights(info,today=today)
         # Complete the source-rights preflight BEFORE creating today's story job.
-        added_highlights=enqueue_licensed_highlights(info,now=moment)
+        candidates=licensed_highlights(info)
+        added_highlights=enqueue_licensed_highlights(info,now=moment,candidates=candidates)
     except (OSError,ValueError,KeyError,TypeError,sqlite3.Error):
         return _preflight_blocked(root,"rights_or_ledger_preflight_blocked",moment)
     recovered=queue.quarantine_stale(root,now=moment,stale_seconds=180,retry_health=True)
-    job_id,created=queue.enqueue(root,"story_day","story:"+today.isoformat(),
-            {"day":today.isoformat(),"ideas_file":info["ideas_file"],
-             "media_dir":info["media_dir"],"timezone":info["timezone"]},now=moment)
-    result=queue.run_once(root,processor=processor,now=moment)
+    story = {"day":today.isoformat(),"ideas_file":info["ideas_file"],
+             "media_dir":info["media_dir"],"timezone":info["timezone"]}
+    job_id,created=queue.enqueue(root,"story_day","story:"+story["day"],story,now=moment)
+
+    def dispatch(state, job):
+        if job["kind"] == "story_day" and job["payload"] != story:
+            return "approval_changed"
+        if job["kind"] == "highlight_scan" and job["payload"] not in candidates.values():
+            return "approval_changed"
+        if job["kind"] != "health_check":
+            validate_rights(info,today=today)
+            if job["kind"] == "highlight_scan" and job["payload"] not in licensed_highlights(info).values():
+                return "approval_changed"
+        return (processor or queue.process_job)(state,job)
+
+    result=queue.run_once(root,processor=dispatch,now=moment)
     report=inspect(root,now=moment)
     alerts=record_alerts(root,report,now=moment)
     _write_report(root,report,alerts)

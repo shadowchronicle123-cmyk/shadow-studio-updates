@@ -1,5 +1,7 @@
 """Production ledger and real 1080p worker acceptance without external services."""
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from functools import partial
 import hashlib
 import json
 import sys
@@ -12,6 +14,8 @@ import wave
 
 from fastapi.testclient import TestClient
 import app
+from local_cycle import cycle
+from worker_queue import queue_status
 import private_upload
 import production_worker as worker
 from production_smoke_test import synthetic_voice
@@ -71,10 +75,24 @@ def main(real=False):
                 raise RuntimeError('test transient error')
             return implementation(*args, **kwargs)
         calls = [0]
-        with patch.object(worker,'generate',side_effect=render):
-            result=worker.run_day(controls,IDEAS,media,day='2026-11-19',**options)
+        ideas_file = root/'ideas.json'
+        ideas_file.write_text(json.dumps(IDEAS), encoding='utf-8')
+        rights = root/'rights.json'
+        rights.write_text(json.dumps([
+            {'file': path.name, 'sha256': digest.hex(), 'permission_reference': 'Generated test footage',
+             'license_scope': 'edit-and-repost', 'perpetual': True}
+            for path, digest in before.items()
+        ]), encoding='utf-8')
+        config = {'enabled':True, 'state_dir':str(controls), 'media_dir':str(media),
+                  'ideas_file':str(ideas_file), 'rights_manifest':str(rights), 'timezone':'UTC'}
+        now = datetime(2026,11,19,tzinfo=timezone.utc)
+        run_worker = partial(worker.run_day, **options)
+        with patch.object(worker,'generate',side_effect=render), patch.object(worker,'run_day',wraps=run_worker):
+            result = cycle(config, now=now)
+            assert cycle(config, now=now)['status'] == 'idle'
         record=worker.status(controls)['jobs'][0]
-        assert result=='ready',record
+        assert result['status'] == 'completed', result
+        assert queue_status(controls)[0]['state'] == 'completed'
         assert 30 <= record['duration'] <= 60
         assert record['attempts']==2 or real
         assert (controls/record['artifact']).is_file()
