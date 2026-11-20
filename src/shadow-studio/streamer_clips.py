@@ -5,7 +5,6 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
-from contextlib import closing
 import tempfile
 from urllib.parse import urlsplit
 
@@ -98,6 +97,9 @@ def make_preview(database, clip_id, output_dir, anchor="center"):
     if clip["license_scope"] not in ("edit-and-repost", "commercial-edit-and-repost"):
         raise ValueError("Preview requires permission to edit and repost the source")
     source = Path(clip["file"])
+    # The dashboard may request its first preview before the output folder exists.
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="streamer-preview-") as temp_dir:
         scratch = Path(temp_dir)
         snapshot = scratch / ("source" + source.suffix)
