@@ -186,20 +186,39 @@ def _write_report(root, report, events):
                 out.write(json.dumps(event)+"\n")
 
 
+def _preflight_blocked(root, code, moment):
+    """Persist a sanitized, deduplicated local alert before returning failure."""
+    report={"status":"error","issues":[{"code":code,"severity":"error",
+            "message":"Unattended production preflight failed; operator review required"}],
+            "counts":{}}
+    new=record_alerts(root,report,now=moment)
+    _write_report(root,report,new)
+    return {"status":"blocked","reason":code,"health":"error",
+            "new_alerts":len(new),"queued":False}
+
+
 def cycle(info, *, now=None, processor=None):
     """One bounded tick; Task Scheduler supplies the repetition."""
     moment=now or datetime.now(timezone.utc)
     root=Path(info["state_dir"])
     if not info["enabled"]:
         return {"status":"disabled", "queued":False}
-    if shutil.disk_usage(root if root.exists() else root.parent).free < MIN_FREE_BYTES:
-        raise RuntimeError("Insufficient free disk space for local rendering")
-    today=moment.astimezone(ZoneInfo(info["timezone"])).date()
-    licensed=validate_rights(info,today=today)
+    try:
+        free=shutil.disk_usage(root if root.exists() else root.parent).free
+    except OSError:
+        return _preflight_blocked(root,"storage_check_unavailable",moment)
+    if free < MIN_FREE_BYTES:
+        return _preflight_blocked(root,"disk_space_low",moment)
+    try:
+        today=moment.astimezone(ZoneInfo(info["timezone"])).date()
+        licensed=validate_rights(info,today=today)
+        # Complete the source-rights preflight BEFORE creating today's story job.
+        added_highlights=enqueue_licensed_highlights(info,now=moment)
+    except (OSError,ValueError,KeyError,TypeError,sqlite3.Error):
+        return _preflight_blocked(root,"rights_or_ledger_preflight_blocked",moment)
     job_id,created=queue.enqueue(root,"story_day","story:"+today.isoformat(),
             {"day":today.isoformat(),"ideas_file":info["ideas_file"],
              "media_dir":info["media_dir"],"timezone":info["timezone"]},now=moment)
-    added_highlights=enqueue_licensed_highlights(info,now=moment)
     result=queue.run_once(root,processor=processor,now=moment)
     report=inspect(root,now=moment)
     alerts=record_alerts(root,report,now=moment)

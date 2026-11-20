@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 
 from local_cycle import config, validate_rights, cycle, record_alerts, enqueue_licensed_highlights
 from streamer_clips import queue_items
@@ -129,6 +131,41 @@ class LocalCycleTests(unittest.TestCase):
               "file":"approved.mp4","start_seconds":0,"end_seconds":36}
         queue_items([item],self.media,clip_db)
         self.assertEqual(enqueue_licensed_highlights(self.info,now=NOW),0)
+
+
+
+    def test_preflight_failure_generates_once_only_local_alert(self):
+        extra=self.media/"unknown.mp4"
+        extra.write_bytes(b"unauthorized")
+        first=cycle(self.info,now=NOW,processor=lambda root,job:"ready")
+        self.assertEqual(first["status"],"blocked")
+        self.assertEqual(first["reason"],"rights_or_ledger_preflight_blocked")
+        self.assertEqual(first["new_alerts"],1)
+        second=cycle(self.info,now=NOW,processor=lambda root,job:"ready")
+        self.assertEqual(second["new_alerts"],0)
+        self.assertEqual(queue_status(self.info["state_dir"]),[])
+        inbox=Path(self.info["state_dir"])/"alerts.jsonl"
+        self.assertEqual(len(inbox.read_text(encoding="utf-8").splitlines()),1)
+        extra.unlink()
+        cleared=cycle(self.info,now=NOW,processor=lambda root,job:"ready")
+        self.assertEqual(cleared["status"],"completed")
+        import worker_queue as q
+        with q.database(self.info["state_dir"]) as db:
+            self.assertEqual(db.execute("SELECT resolved FROM queue_alerts").fetchone()[0],1)
+
+    def test_disk_space_failure_alerts_and_never_queues(self):
+        with patch("local_cycle.shutil.disk_usage",return_value=SimpleNamespace(free=0)):
+            result=cycle(self.info,now=NOW,processor=lambda root,job:"ready")
+        self.assertEqual(result["status"],"blocked")
+        self.assertEqual(result["reason"],"disk_space_low")
+        self.assertEqual(queue_status(self.info["state_dir"]),[])
+
+    def test_missing_opt_in_clip_ledger_alerts_before_story_enqueue(self):
+        self.info["auto_highlights"]=True
+        self.info["clip_database"]=str(self.root/"unavailable.sqlite3")
+        result=cycle(self.info,now=NOW,processor=lambda root,job:"ready")
+        self.assertEqual(result["reason"],"rights_or_ledger_preflight_blocked")
+        self.assertEqual(queue_status(self.info["state_dir"]),[])
 
 
 
