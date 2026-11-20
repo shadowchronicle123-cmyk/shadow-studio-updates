@@ -155,7 +155,7 @@ class CampaignTests(unittest.TestCase):
             "id":"GK1aJgt3Xtw","status":{"privacyStatus":"private"},
             "snippet":{"channelId":channel}
         }
-        with patch("r3born_campaign.verify_channel"), \\
+        with patch("r3born_campaign.verify_channel"), \
              patch("r3born_campaign.transfer", return_value=finished):
             result = upload_reviewed(self.root,"2026-11-19",1,digest,
                 {"SHADOW_YOUTUBE_ACCESS_TOKEN":"mock",
