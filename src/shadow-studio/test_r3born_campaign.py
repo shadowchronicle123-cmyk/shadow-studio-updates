@@ -75,7 +75,7 @@ class CampaignTests(unittest.TestCase):
         }
         with patch("r3born_campaign.verify_channel"), \
              patch("r3born_campaign.transfer", side_effect=RuntimeError("private-token-do-not-print")):
-            with self.assertRaisesRegex(RuntimeError, "media_transfer \\(RuntimeError\\)") as raised:
+            with self.assertRaisesRegex(RuntimeError, "media_transfer \(RuntimeError\)") as raised:
                 upload_reviewed(self.root, "2026-11-19", 1, digest,
                                 {"SHADOW_YOUTUBE_ACCESS_TOKEN": "fake",
                                  "SHADOW_YOUTUBE_CHANNEL_ID": "UC" + "x"*22},
