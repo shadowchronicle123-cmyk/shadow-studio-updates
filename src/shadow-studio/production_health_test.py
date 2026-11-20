@@ -3,6 +3,8 @@ import sqlite3
 from contextlib import closing
 import tempfile
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
+import worker_queue as queue
 import unittest
 from production_health import inspect
 
@@ -49,6 +51,29 @@ class HealthTests(unittest.TestCase):
     def test_missing_ledger_is_unknown(self):
         self.db.unlink()
         self.assertEqual(inspect(self.root)["status"],"unknown")
+
+
+    def test_queue_heartbeat_stale_and_recovery_required(self):
+        moment = datetime(2035, 1, 1, tzinfo=timezone.utc)
+        queue.enqueue(self.root,"health_check","health:2035-01-01",{},now=moment)
+        job=queue.claim(self.root,now=moment)
+        self.assertEqual(inspect(self.root,now=moment+timedelta(seconds=30))["status"],"ok")
+        stale=inspect(self.root,now=moment+timedelta(minutes=5))
+        self.assertIn("queue_heartbeat_stale",[x["code"] for x in stale["issues"]])
+        queue.quarantine_stale(self.root,now=moment+timedelta(minutes=5),stale_seconds=180)
+        blocked=inspect(self.root,now=moment+timedelta(minutes=5))
+        self.assertIn("queue_review_required",[x["code"] for x in blocked["issues"]])
+
+    def test_fresh_supervised_story_does_not_warn_unverified(self):
+        moment=datetime(2035,1,1,tzinfo=timezone.utc)
+        queue.enqueue(self.root,"story_day","story:2035-01-01",
+                      {"day":"2035-01-01","ideas_file":"ideas.json",
+                       "media_dir":"licensed","timezone":"UTC"},now=moment)
+        queue.claim(self.root,now=moment)
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("INSERT INTO jobs VALUES('2035-01-01','running',1,'')")
+        self.assertEqual(inspect(self.root,now=moment+timedelta(seconds=25))["status"],"ok")
+
 
 
 if __name__ == "__main__":
