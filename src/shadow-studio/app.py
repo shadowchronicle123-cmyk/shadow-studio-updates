@@ -20,7 +20,7 @@ from captions import read_captions, as_webvtt
 from voice_engine import VOICES, available_voices, valid_voice, create_voice
 import studio_tools
 from studio_tools import save_project, list_projects, get_project, clip_media, CLIPS
-from streamer_clips import decide_review, make_preview as render_streamer_preview, recent_reviews, queue_items as queue_streamer_clips
+from streamer_clips import clip_review, decide_review, make_preview as render_streamer_preview, recent_reviews, queue_items as queue_streamer_clips
 from gameplay_library import GameplayLibrary, gameplay_duration, gameplay_window
 from split_screen import split_screen
 from video_ranking import rank_videos
@@ -1114,6 +1114,53 @@ def streamer_review_decision(video_id: str, req: StreamerReviewRequest):
     return {'state': req.decision}
 
 
+@app.get('/api/streamer-clips/handoff/{video_id}')
+def streamer_clip_handoff(video_id: str):
+    from private_upload import MAX_BYTES
+    if not re.fullmatch('[a-f0-9]{12}', video_id):
+        raise HTTPException(404, 'Preview not found')
+    database = studio_tools.PROJECTS/'streamer-clips.sqlite3'
+    review = clip_review(database, video_id)
+    video = CLIPS/(video_id+'.mp4')
+    if review is None or not video.is_file():
+        raise HTTPException(404, 'Preview not found')
+    if review['state'] != 'approved':
+        raise HTTPException(409, 'Approve the preview before downloading its handoff')
+    digest = review['sha256']
+    if video.stat().st_size > MAX_BYTES:
+        raise HTTPException(413, 'Preview exceeds the private worker’s 50 MiB limit')
+    if file_digest(video) != digest:
+        raise HTTPException(409, 'Preview changed after approval. Render and review a new preview.')
+    try:
+        quality = quality_analyze(video)
+    except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        raise HTTPException(409, 'Preview could not be verified') from exc
+    if not quality['passed'] or (quality['width'], quality['height']) != (1080, 1920):
+        raise HTTPException(409, 'Preview failed its current quality check')
+    manifest = {
+        'schema':'shadow-studio-clip-handoff/v1', 'id':video_id,
+        'content_type':'streamer_clip', 'channel':'ShadowChronicles', 'visibility':'private',
+        'file':'short.mp4', 'sha256':digest, 'creator':review['creator'],
+        'license_scope':review['license_scope'], 'start_seconds':review['start_seconds'],
+        'end_seconds':review['end_seconds'], 'technical_quality':quality,
+    }
+    buffer = SpooledTemporaryFile(max_size=8*1024*1024)
+    try:
+        with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_STORED) as archive:
+            add_approved_video(archive, 'short.mp4', video, digest)
+            archive.writestr('manifest.json', json.dumps(manifest, indent=2, ensure_ascii=False))
+            archive.writestr('README.txt', 'Review the clip and its reuse rights before any transfer. '
+                             'This local handoff does not send a video to YouTube. '
+                             'Confirm the intended channel and private visibility before authorizing a transfer.')
+        latest = clip_review(database, video_id)
+        if latest is None or latest['state'] != 'approved' or latest['sha256'] != digest:
+            raise HTTPException(409, 'Preview approval changed during packaging')
+        return download_archive(buffer, f'shadow-studio-clip-{video_id}.zip')
+    except (OSError, HTTPException):
+        buffer.close()
+        raise
+
+
 # Split Screen: private, local, owner-uploaded footage only. Does not publish.
 class SplitRequest(BaseModel):
     top_name: str
@@ -1579,6 +1626,14 @@ async function refreshStreamerReviews(){
    preview.textContent='Preview clip';
    preview.onclick=()=>renderToolOutput('streamerReviewPlayer',item.creator,url);
    row.append(preview);
+   if(item.state==='approved'){
+    const handoff=document.createElement('a');
+    handoff.className='button subtle';
+    handoff.textContent='Download private handoff';
+    handoff.href='/api/streamer-clips/handoff/'+encodeURIComponent(item.video_id);
+    handoff.download='';
+    row.append(handoff);
+   }
    for(const [decision,label] of [['approved','Approve'],['rejected','Reject'],['review_required','Reset review']]){
     const button=document.createElement('button');
     button.textContent=label;
