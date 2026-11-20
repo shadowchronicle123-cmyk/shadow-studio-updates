@@ -1,5 +1,5 @@
 """Local authorized production cycle tests. No network, uploads or real rendering."""
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 from local_cycle import config, validate_rights, cycle, record_alerts, enqueue_licensed_highlights
 from streamer_clips import queue_items
-from worker_queue import queue_status
+from worker_queue import claim, enqueue, finish, queue_status
 
 NOW=datetime(2035,1,1,tzinfo=timezone.utc)
 
@@ -55,6 +55,31 @@ class LocalCycleTests(unittest.TestCase):
         self.assertEqual(len(calls),1)
         self.assertEqual(queue_status(self.info["state_dir"])[0]["state"],"completed")
         self.assertTrue((Path(self.info["state_dir"])/"health-latest.json").is_file())
+
+    def test_restart_quarantines_render_and_retries_read_only_work(self):
+        root = self.info["state_dir"]
+        story = {"day": NOW.date().isoformat(), "ideas_file": self.info["ideas_file"],
+                 "media_dir": self.info["media_dir"], "timezone": "UTC"}
+        enqueue(root, "story_day", "story:"+story["day"], story, now=NOW)
+        abandoned_render = claim(root, now=NOW)
+        enqueue(root, "health_check", "restart-health", {}, now=NOW, max_attempts=2)
+        abandoned_check = claim(root, now=NOW)
+        restart = NOW + timedelta(seconds=181)
+        calls = []
+        def check(_root, job):
+            calls.append(job["kind"])
+            return "checked"
+
+        result = cycle(self.info, now=restart, processor=check)
+        self.assertEqual(result["recovered_queue_claims"], 2)
+        self.assertEqual(result["status"], "idle")
+        self.assertEqual([row["state"] for row in queue_status(root)], ["review_required", "retry_wait"])
+        self.assertFalse(finish(root, abandoned_render["id"], abandoned_render["lease"]))
+        self.assertFalse(finish(root, abandoned_check["id"], abandoned_check["lease"]))
+        self.assertEqual(cycle(self.info, now=restart+timedelta(seconds=29), processor=check)["status"], "idle")
+        self.assertEqual(cycle(self.info, now=restart+timedelta(seconds=30), processor=check)["status"], "completed")
+        self.assertEqual(calls, ["health_check"])
+        self.assertEqual(queue_status(root)[1]["attempts"], 2)
 
     def test_unlisted_and_mutated_footage_fail_closed(self):
         (self.media/"unapproved.mp4").write_bytes(b"unknown")

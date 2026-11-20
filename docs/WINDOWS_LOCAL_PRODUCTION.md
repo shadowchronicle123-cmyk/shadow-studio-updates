@@ -95,3 +95,13 @@ The Windows task is never installed by these repository changes; `-Install` is s
 If the task finds unlisted media, missing/mismatched hashes, expired rights, a missing clip ledger, an unavailable disk-space check or insufficient disk space, the cycle does **not** run a render. It writes a sanitized `health-latest.json` issue and adds one deduplicated event to `alerts.jsonl`. Repeated checks update an SQLite occurrence counter rather than repeatedly appending identical alerts. Once the condition clears, the alert is marked resolved.
 
 These are **local alerts only** and are not push notifications, text messages or emails. Windows Task Scheduler does not automatically display their contents. Review the local health and alert files from the signed-in PC, or integrate an authorized notification transport later.
+
+## Acceptance checklist for the actual Windows PC
+
+1. Use a fresh test configuration, isolated state folder, and footage you own. Run `check` and preview the installer without `-Install`.
+2. Run `once` and review the saved video. Check story originality, 1080 × 1920 playback, distinct voices, and caption timing at the beginning, middle, and end.
+3. Interrupt a test render, wait at least four minutes, and run `once` again with the same state. Confirm the expired queue claim is flagged for review, its previous lease cannot complete it, and the same render is not replayed. Inspect the output and production ledger for a separate interrupted render entry.
+4. Run two cycles against the same test state and confirm that only one story is queued for the day. Check `health-latest.json` and `alerts.jsonl` for the failure and recovery state.
+5. Review a local private handoff ZIP. Confirm it contains the approved video and expected checksum. A live private upload and task installation are separate acceptance steps that require owner approval.
+
+The production tick checks for expired leases after successful preflight. Only read-only health checks with a remaining persisted attempt budget can be retried, after an exponential delay. Rendering and highlight jobs go to review. The explicit quarantine command continues to quarantine every expired claim.
