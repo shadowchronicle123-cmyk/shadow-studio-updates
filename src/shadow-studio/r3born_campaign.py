@@ -177,6 +177,7 @@ def upload_reviewed(root, day, slot, expected_sha256, env, *,
             raise ValueError("Slot already claimed")
     auth = {"Authorization": "Bearer " + token}
     media_started = False
+    phase = "session_initialization"
     try:
         initialized = http.post(CREATE, params={"uploadType":"resumable","part":"snippet,status"},
             headers={**auth,"X-Upload-Content-Type":"video/mp4",
@@ -198,17 +199,26 @@ def upload_reviewed(root, day, slot, expected_sha256, env, *,
                     raise RuntimeError("Production stopped")
         check_stop()
         media_started = True
-        response = transfer(http, location, auth, contents, check_stop).json()
+        phase = "media_transfer"
+        uploaded = transfer(http, location, auth, contents, check_stop)
+        phase = "response_validation"
+        response = uploaded.json()
         video_id = str(response.get("id",""))
         if (not re.fullmatch(r"[A-Za-z0-9_-]{11}",video_id) or
             response.get("status",{}).get("privacyStatus") != "private" or
             response.get("snippet",{}).get("channelId") != channel_id):
             raise RuntimeError("YouTube did not confirm private upload and channel")
-    except Exception:
+    except (OSError, RuntimeError, ValueError, TypeError, AttributeError,
+            requests.RequestException) as exc:
         with campaign_db(root) as db:
             db.execute("UPDATE r3born_uploads SET state=? WHERE day=? AND slot=?",
                        ("needs_reconciliation" if media_started else "retryable",day,slot))
-        raise RuntimeError("Upload unconfirmed; inspect YouTube Studio before any retry") from None
+        # Never include response bodies, resumable session URLs, OAuth tokens, or
+        # exception strings: those may contain credentials or private metadata.
+        kind = type(exc).__name__
+        raise RuntimeError(
+            f"Upload unconfirmed at {phase} ({kind}); "
+            "inspect YouTube Studio before any retry") from None
     with campaign_db(root) as db:
         db.execute("UPDATE r3born_uploads SET state='private',video_id=? WHERE day=? AND slot=?",
                    (video_id,day,slot))
