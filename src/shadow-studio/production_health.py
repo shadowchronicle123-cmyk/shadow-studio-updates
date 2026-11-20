@@ -3,7 +3,8 @@
 No network calls, no credentials, no uploads, no public publishing.
 """
 import argparse
-from datetime import datetime, timezone, timedelta
+from contextlib import closing
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
@@ -30,7 +31,7 @@ def inspect(state, *, now=None, stale_minutes=90, max_render_attempts=2):
     try:
         # SQLite immutable mode is unsafe with WAL; mode=ro honors committed WAL
         # data and never creates a new database.
-        with sqlite3.connect(dbpath.as_uri() + "?mode=ro", uri=True, timeout=5) as db:
+        with closing(sqlite3.connect(dbpath.as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
             db.row_factory = sqlite3.Row
             tables = _tables(db)
             if "jobs" in tables:
