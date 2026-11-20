@@ -67,6 +67,25 @@ def run():
             assert reserve(path, day=bad_day, fingerprint=f"{6:064x}", kind="clip",
                            permission_verified=True, quality_passed=True,
                            quota_limit=32000)[1] == "invalid_or_unverified_configuration"
+    # Restart persistence: reservation, quota claim and audit survive new connections.
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "persistent.sqlite3"
+        fp = f"{88:064x}"
+        register_rights(path, fp, "review-88", authorized=True, reviewer_reference="qa-reviewer")
+        assert claim(path, 88) == (True, "reserved")
+        before = snapshot(path)
+        assert len(before["reservations"]) == 1
+        assert claim(path, 88) == (False, "duplicate")
+        assert snapshot(path)["reservations"] == before["reservations"]
+        assert len(snapshot(path)["audit"]) == len(before["audit"]) + 1
+        # Revoking a rights approval blocks any future claim for that fingerprint.
+        register_rights(path, fp, "revoked-88", authorized=False, reviewer_reference="qa-reviewer")
+        assert claim(path, 88) == (False, "rights_unverified")
+        assert snapshot(path)["reservations"] == before["reservations"]
+        set_stop(path, True)
+        assert snapshot(path)["stopped"] is True
+        assert claim(path, 89) == (False, "emergency_stop")
+        assert snapshot(path)["stopped"] is True
     print("PASS offline atomic 20/day ledger, quota, rights, stop, duplicates, concurrency and audit")
 
 if __name__ == "__main__":
