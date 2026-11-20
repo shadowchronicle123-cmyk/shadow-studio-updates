@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from r3born_campaign import campaign_db, register
-from campaign_review import review, ready
+from campaign_review import review, ready, dispatch_due
 
 
 class ReviewTests(unittest.TestCase):
@@ -59,6 +59,31 @@ class ReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"manual reconciliation"):
             review(self.root,"2026-11-20",1,"reject")
         self.assertEqual(ready(self.root)[0]["video_id"],"k35fTGK9erE")
+
+
+    def test_due_dispatch_calls_only_preapproved_scheduled_private_handoff(self):
+        review(self.root,"2026-11-20",1,"approve")
+        review(self.root,"2026-11-20",1,"schedule",at="2035-11-22T14:00:00-05:00")
+        calls = []
+        def fake_send(root, day, slot, digest, env, **kwargs):
+            calls.append((day,slot,digest,kwargs))
+            return "GK1aJgt3Xtw"
+        early = dispatch_due(self.root, {}, confirmed=True,
+                             audience="not-made-for-kids",
+                             now="2035-11-22T18:00:00Z", uploader=fake_send)
+        self.assertEqual(early, [])
+        self.assertEqual(calls, [])
+        result = dispatch_due(self.root, {}, confirmed=True,
+                              audience="not-made-for-kids",
+                              now="2035-11-22T20:00:00Z", uploader=fake_send)
+        self.assertEqual(result[0]["video_id"], "GK1aJgt3Xtw")
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0][3]["confirmed"], True)
+        self.assertEqual(calls[0][3]["audience"], "not-made-for-kids")
+
+    def test_due_dispatch_requires_explicit_private_confirmation(self):
+        with self.assertRaisesRegex(ValueError,"Explicit private dispatch"):
+            dispatch_due(self.root, {}, audience="not-made-for-kids")
 
 
 if __name__ == "__main__":
