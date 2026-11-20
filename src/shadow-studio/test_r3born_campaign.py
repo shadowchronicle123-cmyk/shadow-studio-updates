@@ -1,11 +1,12 @@
 """Offline regression tests for campaign slots; never contact YouTube."""
 import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from r3born_campaign import register, campaign_db, upload_reviewed, download_campaign
+from r3born_campaign import register, campaign_db, upload_reviewed, download_campaign, validate_media
 
 
 class CampaignTests(unittest.TestCase):
@@ -13,6 +14,9 @@ class CampaignTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        media_patch = patch("r3born_campaign.validate_media", return_value={"duration":35,"width":1080,"height":1920})
+        media_patch.start()
+        self.addCleanup(media_patch.stop)
         self.files = []
         for n in range(4):
             path = self.root / f"captioned-{n}.mp4"
@@ -65,6 +69,30 @@ class CampaignTests(unittest.TestCase):
         digest = hashlib.sha256(self.files[0].read_bytes()).hexdigest()
         with self.assertRaisesRegex(ValueError, "Explicit private confirmation"):
             upload_reviewed(self.root,"2026-11-19",1,digest,{},confirmed=False)
+
+    def test_metadata_rejects_campaign_banned_reference(self):
+        with self.assertRaisesRegex(ValueError, "FaZe"):
+            self.register(0, description="#r3born @hardscope FaZe")
+
+    def test_ffprobe_detects_missing_audio(self):
+        example = {"format":{"duration":"35.0"},"streams":[{"codec_type":"video","width":1080,"height":1920}]}
+        with patch("r3born_campaign.subprocess.run") as probe:
+            probe.return_value.stdout = json.dumps(example)
+            with self.assertRaisesRegex(ValueError, "original audio"):
+                validate_media(self.files[0])
+
+    def test_ffprobe_detects_landscape(self):
+        example = {"format":{"duration":"35.0"},"streams":[{"codec_type":"video","width":1920,"height":1080},{"codec_type":"audio"}]}
+        with patch("r3born_campaign.subprocess.run") as probe:
+            probe.return_value.stdout = json.dumps(example)
+            with self.assertRaisesRegex(ValueError, "vertical"):
+                validate_media(self.files[0])
+
+    def test_ffprobe_accepts_vertical_with_audio(self):
+        example = {"format":{"duration":"35.0"},"streams":[{"codec_type":"video","width":1080,"height":1920},{"codec_type":"audio"}]}
+        with patch("r3born_campaign.subprocess.run") as probe:
+            probe.return_value.stdout = json.dumps(example)
+            self.assertEqual(validate_media(self.files[0])["duration"], 35)
 
     def test_download_rejects_non_https(self):
         with self.assertRaisesRegex(ValueError, "HTTPS"):
