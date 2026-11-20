@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 
-from streamer_clips import queue, validate
+from streamer_clips import queue, validate, make_preview
 
 
 def main():
@@ -21,6 +21,18 @@ def main():
         database = root / "clips.sqlite3"
         assert queue(manifest, media, database)["queued"] == 1
         assert queue(manifest, media, database)["queued"] == 0
+        # A new preview destination should be created before staging.
+        # Missing licensed source must still fail closed.
+        missing_output = root / "new" / "preview"
+        (media / "clip.mp4").unlink()
+        try:
+            make_preview(database, 1, missing_output)
+        except FileNotFoundError:
+            pass
+        else:
+            raise AssertionError("Missing licensed source was accepted")
+        assert missing_output.is_dir()
+        (media / "clip.mp4").write_bytes(b"local fixture")
         for update in ({"permission_reference": ""}, {"license_scope": "unknown"},
                        {"file": "../clips.json"}, {"end_seconds": 500},
                        {"source_url": "https://example.com/video"}):
