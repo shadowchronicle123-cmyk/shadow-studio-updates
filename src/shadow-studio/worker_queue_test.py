@@ -74,7 +74,8 @@ class WorkerQueueTests(unittest.TestCase):
         self.assertFalse(q.heartbeat(self.root,job["id"],job["lease"],now=T0))
 
     def test_processing_done_and_exception_is_sanitized(self):
-        q.enqueue(self.root,"health_check","health:2035-01-01",{},now=T0)
+        q.enqueue(self.root,"health_check","health:2035-01-01",{},
+                  now=datetime.now(timezone.utc)-timedelta(minutes=1))
         self.assertEqual(q.run_once(self.root,processor=lambda root,job:"checked")["status"],
                          "completed")
         q.enqueue(self.root,"health_check","health:2035-01-02",{})
