@@ -1,8 +1,9 @@
 """Offline SQLite ledger tests: concurrency, quota, duplicate, stop, audit."""
 from concurrent.futures import ThreadPoolExecutor
+import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from batch_ledger import reserve, set_stop, snapshot, register_rights
+from batch_ledger import reserve, set_stop, snapshot, register_rights, transaction
 
 DAY = "2026-11-20"
 
@@ -86,6 +87,19 @@ def run():
         assert snapshot(path)["stopped"] is True
         assert claim(path, 89) == (False, "emergency_stop")
         assert snapshot(path)["stopped"] is True
+    # The local audit is append-only for ordinary SQL writes.
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "audit.sqlite3"
+        set_stop(path, True)
+        with transaction(path) as db:
+            for statement in ("DELETE FROM audit", "UPDATE audit SET detail='altered'"):
+                try:
+                    db.execute(statement)
+                except sqlite3.IntegrityError:
+                    pass
+                else:
+                    raise AssertionError("Audit mutation was accepted")
+        assert snapshot(path)["audit"] == [("emergency_stop", "")]
     print("PASS offline atomic 20/day ledger, quota, rights, stop, duplicates, concurrency and audit")
 
 if __name__ == "__main__":
