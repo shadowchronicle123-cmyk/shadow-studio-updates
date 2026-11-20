@@ -4,6 +4,8 @@ on:
     paths:
       - 'src/shadow-studio/publication_policy.py'
       - 'src/shadow-studio/publication_policy_test.py'
+      - 'src/shadow-studio/batch_planner.py'
+      - 'src/shadow-studio/batch_planner_test.py'
       - '.github/workflows/publication-policy-qa.yml'
   push:
     branches:
@@ -29,3 +31,5 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Validate offline publication policy (no network or uploads)
         run: python src/shadow-studio/publication_policy_test.py
+      - name: Validate offline clips-first batch planner
+        run: python src/shadow-studio/batch_planner_test.py
