@@ -40,6 +40,20 @@ def main():
             report=analyze(path)
             assert report['passed'] and (report['width'],report['height'],report['fps'])==(1080,1920,30)
             assert 3.3 < report['duration_seconds'] < 3.7
+            review_url = '/api/streamer-clips/review'
+            rows = client.get(review_url).json()
+            assert len(rows) == 1 and rows[0]['state'] == 'review_required'
+            assert rows[0]['creator'] == item['creator']
+            assert 'permission_reference' not in rows[0] and 'file' not in rows[0]
+            decision_url = review_url + '/' + rows[0]['video_id']
+            assert client.post(decision_url,json={'decision':'published'}).status_code == 422
+            assert client.post(decision_url,json={'decision':'approved'}).status_code == 200
+            assert TestClient(app.app).get(review_url).json()[0]['state'] == 'approved'
+            assert client.post(decision_url,json={'decision':'rejected'}).status_code == 200
+            path.write_bytes(b'changed rendered clip')
+            assert client.post(decision_url,json={'decision':'approved'}).status_code == 409
+            assert client.get(review_url).json()[0]['state'] == 'rejected'
+            assert client.post(review_url+'/000000000000',json={'decision':'approved'}).status_code == 404
             fixture.write_bytes(b'changed source')
             try:
                 make_preview(root/'projects'/'streamer-clips.sqlite3',data['clip_id'],previews)
@@ -47,7 +61,7 @@ def main():
                 assert 'changed after rights intake' in str(exc)
             else:
                 raise AssertionError('Changed source produced a clip')
-    print("PASS rights evidence, deduplication, source integrity and real 1080p preview download")
+    print("PASS rights evidence, deduplication, source integrity, real 1080p preview and persistent clip review")
 
 
 if __name__ == "__main__":
