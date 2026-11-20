@@ -11,7 +11,7 @@ def run():
     assert selected == [base, clip2, story] and not rejected
     assert plan_batch([base, base], quota_remaining=3200)[1][0][1] == "duplicate"
     assert plan_batch([base], existing_fingerprints={fingerprint(base)}, quota_remaining=3200)[1][0][1] == "duplicate"
-    assert plan_batch([base], stopped=True, quota_remaining=3200)[1] == ("batch", "emergency_stop")
+    assert plan_batch([base], stopped=True, quota_remaining=3200)[1] == [("batch", "emergency_stop")]
     assert plan_batch([base])[1] == [("batch", "quota_unverified")]
     assert plan_batch([base], quota_remaining=1599)[1][0][1] == "quota_budget"
     assert plan_batch([base], already_reserved=20, quota_remaining=3200)[1][0][1] == "daily_capacity"
