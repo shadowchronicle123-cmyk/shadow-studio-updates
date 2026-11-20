@@ -3,7 +3,10 @@ from datetime import datetime, timezone, date, timedelta
 import hashlib
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -92,6 +95,52 @@ class LocalCycleTests(unittest.TestCase):
         self.assertEqual(outcome["status"], "review_required")
         self.assertEqual(queue_status(root)[0]["reason"], "approval_changed")
         self.assertFalse(calls)
+
+    def test_killed_renderer_preserves_partial_without_blocking_next_day(self):
+        root = Path(self.info["state_dir"])
+        child_code = """
+import json, sys, time
+from datetime import datetime
+from pathlib import Path
+import production_worker
+from local_cycle import cycle
+
+def partial_render(script, folder, **kwargs):
+    (Path(folder)/'short.mp4').write_bytes(b'partial export')
+    Path(sys.argv[3]).touch()
+    time.sleep(90)
+    raise RuntimeError('test did not terminate the child')
+
+production_worker.generate = partial_render
+cycle(json.loads(sys.argv[1]), now=datetime.fromisoformat(sys.argv[2]))
+"""
+        ready = self.root/"partial-ready"
+        child = subprocess.Popen([sys.executable, "-c", child_code, json.dumps(self.info),
+                                  NOW.isoformat(), str(ready)], cwd=Path(__file__).resolve().parent)
+        try:
+            deadline = time.monotonic()+30
+            while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(.05)
+            self.assertTrue(ready.exists(), "Worker never reached the partial export")
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=10)
+        from production_worker import ledger, reserve, status
+        old_day = NOW.date().isoformat()
+        partial, = (root/"renders").glob("working-*/short.mp4")
+        new_day = (NOW+timedelta(days=1)).date().isoformat()
+        self.assertEqual(status(root)["jobs"][0]["state"], "running")
+        queue = cycle(self.info, now=NOW+timedelta(seconds=181),
+                      processor=lambda *_: self.fail("Interrupted render replayed"))
+        self.assertEqual(queue["recovered_queue_claims"], 1)
+        self.assertEqual(status(root)["jobs"][0]["state"], "failed")
+        self.assertEqual(partial.read_bytes(), b"partial export")
+        self.assertFalse((root/"renders"/old_day).exists())
+        with ledger(root) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM verified_exports").fetchone()[0], 0)
+        self.assertEqual(reserve(root,old_day,["The old premise"],[self.video])[0], "daily_limit")
+        self.assertEqual(reserve(root,new_day,["A fresh premise"],[self.video])[0], "reserved")
 
     def test_unlisted_and_mutated_footage_fail_closed(self):
         (self.media/"unapproved.mp4").write_bytes(b"unknown")

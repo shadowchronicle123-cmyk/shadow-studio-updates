@@ -89,6 +89,10 @@ def reserve(root, day, ideas, clips, invocation=None):
         db.execute('BEGIN IMMEDIATE')
         if db.execute('SELECT stopped FROM control').fetchone()[0]:
             return 'stopped', None
+        if invocation and invocation.startswith('queue:') and not db.execute(
+            "SELECT 1 FROM local_queue WHERE lease=? AND state='claimed'", (invocation[6:],)
+        ).fetchone():
+            return 'lease_lost', None
         if db.execute('SELECT 1 FROM jobs WHERE day=?', (day,)).fetchone():
             return 'daily_limit', None
         if db.execute("SELECT 1 FROM jobs WHERE state='running'").fetchone():
@@ -175,10 +179,15 @@ def run_day(root, ideas, media, timezone='UTC', *, day=None, narrator=local_narr
     output = root/'renders'
     output.mkdir(exist_ok=True)
 
+    def require_running(db):
+        if db.execute('SELECT state FROM jobs WHERE day=?',(day,)).fetchone()[0] != 'running':
+            raise Stopped()
+
     def progress(percent, message):
         with ledger(root) as db:
             if db.execute('SELECT stopped FROM control').fetchone()[0]:
                 raise Stopped()
+            require_running(db)
             db.execute('UPDATE jobs SET progress=?,message=? WHERE day=?', (min(percent,95),message,day))
 
     try:
@@ -213,6 +222,7 @@ def run_day(root, ideas, media, timezone='UTC', *, day=None, narrator=local_narr
                         db.execute('BEGIN IMMEDIATE')
                         if db.execute('SELECT stopped FROM control').fetchone()[0]:
                             raise Stopped()
+                        require_running(db)
                         if final.exists():
                             raise ValueError('The daily output already exists. Review the existing files.')
                         staged.rename(final)
@@ -225,11 +235,11 @@ def run_day(root, ideas, media, timezone='UTC', *, day=None, narrator=local_narr
                 if attempt == ATTEMPTS or (output/day).exists():
                     reason = str(exc) if isinstance(exc,ValueError) else 'Render or narration failed. Check FFmpeg, eSpeak and footage.'
                     with ledger(root) as db:
-                        db.execute("UPDATE jobs SET state='failed',message=? WHERE day=?", (reason,day))
+                        db.execute("UPDATE jobs SET state='failed',message=? WHERE day=? AND state='running'", (reason,day))
                     return 'failed'
     except Stopped:
         with ledger(root) as db:
-            db.execute("UPDATE jobs SET state='stopped',message='Emergency stop requested' WHERE day=?", (day,))
+            db.execute("UPDATE jobs SET state='stopped',message='Emergency stop requested' WHERE day=? AND state='running'", (day,))
         return 'stopped'
 
 
